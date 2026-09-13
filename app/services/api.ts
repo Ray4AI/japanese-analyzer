@@ -414,7 +414,16 @@ function extractJsonText(content: string): string {
     return jsonMatch[1].trim();
   }
 
-  return content.trim();
+  const trimmed = content.trim();
+  // 宽容兜底（与 word-detail 解析器一致）：模型在 JSON 外包了说明文字时，
+  // 提取首个 { 到最后一个 } 之间的内容再尝试解析。
+  if (trimmed.startsWith('{') || trimmed.endsWith('}')) return trimmed;
+  const objectStart = trimmed.indexOf('{');
+  const objectEnd = trimmed.lastIndexOf('}');
+  if (objectStart !== -1 && objectEnd > objectStart) {
+    return trimmed.slice(objectStart, objectEnd + 1);
+  }
+  return trimmed;
 }
 
 function normalizeTokenDataArray(parsed: unknown): TokenData[] {

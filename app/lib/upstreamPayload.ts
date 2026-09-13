@@ -70,6 +70,9 @@ export function getStructuredResponseFormat(
   provider: AIProvider,
   kind: StructuredOutputKind
 ): Record<string, unknown> {
+  // 复用原项目 DeepSeek 的成熟方案：json_object 模式 + 宽容解析器。
+  // OpenRouter 各上游对 json_schema strict 支持参差不齐（部分直接 400），
+  // json_object 兼容性最好，配合原有的提取/校验逻辑解析成功率更高。
   if (provider === 'deepseek' || provider === CUSTOM_TEXT_PROVIDER) {
     return { type: 'json_object' };
   }
