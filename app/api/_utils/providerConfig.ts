@@ -1,5 +1,14 @@
 import { NextRequest } from 'next/server';
 import {
+  CUSTOM_TEXT_PROVIDER,
+  resolveCustomTextUrl,
+} from '../../lib/customProvider';
+import {
+  withProviderControls,
+  getStructuredResponseFormat,
+  type StructuredOutputKind,
+} from '../../lib/upstreamPayload';
+import {
   DEFAULT_AI_PROVIDER,
   getModelName,
   normalizeAIModel,
@@ -7,9 +16,13 @@ import {
   type AIProvider,
 } from '../../lib/aiModels';
 
-export type StructuredOutputKind = 'analysisTokens' | 'wordDetail';
-export { DEFAULT_AI_PROVIDER, normalizeAIProvider };
-export type { AIProvider };
+export {
+  DEFAULT_AI_PROVIDER,
+  normalizeAIProvider,
+  withProviderControls,
+  getStructuredResponseFormat,
+};
+export type { AIProvider, StructuredOutputKind };
 
 export const GEMINI_OPENAI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions';
 const DEEPSEEK_OPENAI_API_URL = 'https://api.deepseek.com/chat/completions';
@@ -22,6 +35,50 @@ export class ProviderConfigError extends Error {
     this.name = 'ProviderConfigError';
     this.status = status;
   }
+}
+
+// 自用：透传客户端提供的 OpenAI 兼容端点配置。
+export interface CustomOpenAIRequestOptions {
+  /** 客户端传入的 OpenAI 兼容 base URL（含 /v1） */
+  customApiUrl?: unknown;
+  /** 客户端传入的 API Key */
+  customApiKey?: unknown;
+  /** 客户端传入的模型名 */
+  customModel?: unknown;
+  /** 客户端传入的额外请求体 JSON 字符串 */
+  customExtraBody?: unknown;
+}
+
+function asNonEmptyString(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+/**
+ * 解析自定义 OpenAI 兼容端点配置。客户端未提供 URL/Key/Model 时回退服务器环境变量
+ * CUSTOM_OPENAI_API_URL / CUSTOM_OPENAI_API_KEY / CUSTOM_OPENAI_MODEL。
+ */
+export function resolveCustomOpenAIConfig(options: CustomOpenAIRequestOptions): {
+  apiUrl: string;
+  apiKey: string;
+  model: string;
+  extraBody: string;
+} {
+  const apiUrl = asNonEmptyString(options.customApiUrl)
+    || process.env.CUSTOM_OPENAI_API_URL || '';
+  const apiKey = asNonEmptyString(options.customApiKey)
+    || process.env.CUSTOM_OPENAI_API_KEY || '';
+  const model = asNonEmptyString(options.customModel)
+    || process.env.CUSTOM_OPENAI_MODEL || '';
+  const extraBody = asNonEmptyString(options.customExtraBody);
+
+  if (!apiUrl) {
+    throw new ProviderConfigError('未配置自定义端点：请在设置中填写 API 地址。');
+  }
+  if (!apiKey) {
+    throw new ProviderConfigError('未配置自定义端点：请在设置中填写 API 密钥。');
+  }
+
+  return { apiUrl, apiKey, model, extraBody };
 }
 
 function getBearerToken(req: NextRequest): string {
@@ -71,108 +128,44 @@ export function resolveProviderConfig(
   };
 }
 
-const analysisTokensSchema = {
-  type: 'object',
-  properties: {
-    tokens: {
-      type: 'array',
-      items: {
-        type: 'object',
-        properties: {
-          word: { type: 'string' },
-          pos: { type: 'string' },
-          furigana: { type: 'string' },
-        },
-        required: ['word', 'pos', 'furigana'],
-        additionalProperties: false,
-      },
-    },
-  },
-  required: ['tokens'],
-  additionalProperties: false,
-} as const;
-
-const wordDetailSchema = {
-  type: 'object',
-  properties: {
-    chineseTranslation: { type: 'string' },
-    pos: { type: 'string' },
-    furigana: { type: 'string' },
-    dictionaryForm: { type: 'string' },
-    explanation: { type: 'string' },
-    conjugation: { type: 'string' },
-    example: { type: 'string' },
-    exampleTranslation: { type: 'string' },
-  },
-  required: [
-    'chineseTranslation',
-    'pos',
-    'furigana',
-    'dictionaryForm',
-    'explanation',
-    'conjugation',
-    'example',
-    'exampleTranslation',
-  ],
-  additionalProperties: false,
-} as const;
-
-const structuredOutputSchemas = {
-  analysisTokens: {
-    name: 'japanese_sentence_analysis',
-    schema: analysisTokensSchema,
-  },
-  wordDetail: {
-    name: 'japanese_word_detail',
-    schema: wordDetailSchema,
-  },
-} as const;
-
-export function getStructuredResponseFormat(
-  provider: AIProvider,
-  kind: StructuredOutputKind
-): Record<string, unknown> {
-  if (provider === 'deepseek') {
-    return { type: 'json_object' };
-  }
-
-  const structuredOutput = structuredOutputSchemas[kind];
-  return {
-    type: 'json_schema',
-    json_schema: {
-      name: structuredOutput.name,
-      strict: true,
-      schema: structuredOutput.schema,
-    },
-  };
-}
-
-export function withProviderControls(
-  provider: AIProvider,
-  payload: Record<string, unknown>,
+/**
+ * 各 API 路由的统一入口：custom-openai 走客户端透传配置，内置服务商走服务器配置。
+ * 返回的 customExtraBody 供 withProviderControls 使用。
+ */
+export function resolveRequestProviderConfig(
+  req: NextRequest,
   options: {
-    structuredOutput?: StructuredOutputKind;
-    enableThinking?: boolean;
+    provider?: unknown;
+    apiUrl?: unknown;
+    model?: unknown;
+    customApiUrl?: unknown;
+    customApiKey?: unknown;
+    customModel?: unknown;
+    customExtraBody?: unknown;
   } = {}
-): Record<string, unknown> {
-  const responseFormat = options.structuredOutput
-    ? { response_format: getStructuredResponseFormat(provider, options.structuredOutput) }
-    : {};
+) {
+  const provider = normalizeAIProvider(options.provider);
 
-  if (provider === 'deepseek') {
-    const thinkingEnabled = options.enableThinking === true;
-
+  if (provider === CUSTOM_TEXT_PROVIDER) {
+    const custom = resolveCustomOpenAIConfig({
+      customApiUrl: options.customApiUrl,
+      customApiKey: options.customApiKey,
+      customModel: options.customModel,
+      customExtraBody: options.customExtraBody,
+    });
     return {
-      ...payload,
-      ...responseFormat,
-      thinking: { type: thinkingEnabled ? 'enabled' : 'disabled' },
-      ...(thinkingEnabled ? { reasoning_effort: 'high' } : {}),
+      provider,
+      apiKey: custom.apiKey,
+      apiUrl: resolveCustomTextUrl(custom.apiUrl),
+      model: custom.model || 'default',
+      customExtraBody: custom.extraBody,
     };
   }
 
-  return {
-    ...payload,
-    ...responseFormat,
-    reasoning_effort: payload.model === 'gemini-flash-latest' ? 'low' : 'minimal',
-  };
+  const base = resolveProviderConfig(req, {
+    provider,
+    apiUrl: options.apiUrl,
+    model: options.model,
+  });
+  return { ...base, customExtraBody: '' };
 }

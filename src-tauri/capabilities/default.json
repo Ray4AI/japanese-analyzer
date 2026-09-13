@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "默认窗口能力（含 HTTP 直连权限，用于绕过 CORS 访问自定义 OpenAI 兼容端点）",
+  "windows": ["main"],
+  "permissions": ["core:default", "http:default"]
+}

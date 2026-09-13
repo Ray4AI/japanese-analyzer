@@ -13,7 +13,12 @@ import {
   trackTtsUsage,
   type AnalyzeUsageMetadata
 } from '../utils/analytics';
+import {
+  CUSTOM_TTS_STORAGE_KEYS,
+  type CustomTtsConfig,
+} from '../lib/customProvider';
 import { Icon } from './Icons';
+import CustomTtsSettings from './CustomTtsSettings';
 import { TextShimmer } from '@/components/ui/text-shimmer';
 import { StateMorphButton, StateMorphButtonState } from '@/components/ui/state-morph-button';
 import { normalizePastedText } from '../utils/pastedText';
@@ -27,6 +32,8 @@ interface InputSectionProps {
   useStream?: boolean;
   ttsProvider: TTSProvider;
   onTtsProviderChange: (provider: TTSProvider) => void;
+  customTtsConfig: CustomTtsConfig;
+  onCustomTtsConfigChange: (config: CustomTtsConfig) => void;
   isAnalyzing?: boolean;
 }
 
@@ -72,6 +79,8 @@ export default function InputSection({
   useStream = true, // 默认启用流式输出
   ttsProvider,
   onTtsProviderChange,
+  customTtsConfig,
+  onCustomTtsConfigChange,
   isAnalyzing = false
 }: InputSectionProps) {
   const { t, locale, errorText } = useLanguage();
@@ -273,6 +282,13 @@ export default function InputSection({
         const url = await getJapaneseTtsAudioUrl(textToSpeak, geminiApiKey, 'gemini', { voice: selectedVoice, pitch: 0 });
         setTtsAudioUrl(url);
         markTtsUsed('gemini');
+      } else if (ttsProvider === 'custom-openai-tts') {
+        // 自用：OpenAI 兼容 /audio/speech 端点（OpenRouter、edge-tts-openai 部署等）
+        const url = await getJapaneseTtsAudioUrl(inputText, undefined, 'custom-openai-tts', {
+          custom: customTtsConfig,
+        });
+        setTtsAudioUrl(url);
+        markTtsUsed('custom-openai-tts');
       }
     } catch (e) {
       console.error('TTS error:', e);
@@ -306,6 +322,11 @@ export default function InputSection({
   const handleStyleChange = (style: string) => {
     setSelectedStyle(style);
     localStorage.setItem('ttsStyle', style);
+  };
+
+  // 自用：保存自定义语音端点配置（由设置弹窗集中编辑时同样写入这些键）
+  const saveCustomTtsField = (key: keyof typeof CUSTOM_TTS_STORAGE_KEYS, value: string) => {
+    localStorage.setItem(CUSTOM_TTS_STORAGE_KEYS[key], value);
   };
 
   // 根据文本长度估算合成时间
@@ -643,18 +664,18 @@ export default function InputSection({
                   {/* TTS提供商选择 */}
                   <div className="mb-3">
                     <label className="mb-2 block text-xs font-medium" style={{ color: 'var(--ink-2)' }}>{t("语音引擎")}</label>
-                    <div className="segmented-control grid grid-cols-2 gap-1 rounded-xl p-1">
-                      {(['edge', 'gemini'] as const).map((provider) => (
+                    <div className="segmented-control grid grid-cols-3 gap-1 rounded-xl p-1">
+                      {(['edge', 'gemini', 'custom-openai-tts'] as const).map((provider) => (
                         <button
                           key={provider}
-                          className="cursor-pointer rounded-lg border-none px-3 py-2 text-sm transition-colors"
+                          className="cursor-pointer rounded-lg border-none px-2 py-2 text-xs transition-colors"
                           aria-pressed={ttsProvider === provider}
                           style={ttsProvider === provider
                             ? { background: 'var(--bg-2)', color: 'var(--ink)', fontWeight: 500 }
                             : { background: 'transparent', color: 'var(--ink-2)' }}
                           onClick={() => handleTtsProviderSelect(provider)}
                         >
-                          {provider === 'edge' ? 'Edge TTS' : 'Gemini TTS'}
+                          {provider === 'edge' ? 'Edge TTS' : provider === 'gemini' ? 'Gemini TTS' : '自定义'}
                         </button>
                       ))}
                     </div>
@@ -736,6 +757,22 @@ export default function InputSection({
                         </select>
                       </div>
                     </>
+                  )}
+                  {/* 自定义 OpenAI 兼容 TTS 设置 */}
+                  {ttsProvider === 'custom-openai-tts' && (
+                    <CustomTtsSettings
+                      config={customTtsConfig}
+                      onChange={(patch) => {
+                        Object.entries(patch).forEach(([key, value]) => {
+                          if (key === 'speed') {
+                            localStorage.setItem(CUSTOM_TTS_STORAGE_KEYS.speed, String(value));
+                          } else {
+                            saveCustomTtsField(key as keyof typeof CUSTOM_TTS_STORAGE_KEYS, String(value));
+                          }
+                        });
+                        onCustomTtsConfigChange({ ...customTtsConfig, ...patch });
+                      }}
+                    />
                   )}
                 </div>
               )}

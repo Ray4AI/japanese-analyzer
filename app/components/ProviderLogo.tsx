@@ -6,6 +6,7 @@ import type { AIProvider } from '../services/api';
 export const PROVIDER_LABELS: Record<AIProvider, string> = {
   gemini: 'Gemini',
   deepseek: 'DeepSeek',
+  'custom-openai': '自定义端点',
 };
 
 interface ProviderLogoProps {
@@ -42,6 +43,17 @@ export function ProviderLogo({ provider, className = 'h-4 w-4' }: ProviderLogoPr
             <stop offset=".46" stopColor="#FABC12" stopOpacity="0" />
           </linearGradient>
         </defs>
+      </svg>
+    );
+  }
+
+  if (provider === 'custom-openai') {
+    return (
+      <svg className={`${className} shrink-0`} viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+        <path
+          fill="currentColor"
+          d="M5.636 4.222a1.5 1.5 0 012.121 0L12 8.44l4.243-4.218a1.5 1.5 0 112.121 2.12L14.12 10.563l4.243 4.218a1.5 1.5 0 11-2.122 2.122L12 12.683l-4.243 4.22a1.5 1.5 0 11-2.12-2.122l4.242-4.218L5.636 6.343a1.5 1.5 0 010-2.121z"
+        />
       </svg>
     );
   }

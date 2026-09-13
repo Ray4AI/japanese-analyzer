@@ -3,6 +3,10 @@
 import { useLanguage } from '../contexts/LanguageContext';
 import { useEffect, useState } from 'react';
 import { DEEPSEEK_MODEL_OPTIONS, GEMINI_MODEL_OPTIONS, getModelName, type AIModelName, type AIProvider } from '../services/api';
+import {
+  CUSTOM_TEXT_PROVIDER,
+  parseCustomExtraBody,
+} from '../lib/customProvider';
 import { Icon } from './Icons';
 import { ProviderLogo, PROVIDER_LABELS } from './ProviderLogo';
 import { Switch } from '@/components/ui/switch';
@@ -14,6 +18,10 @@ interface SettingsPayload {
   deepseekApiKey: string;
   deepseekThinkingEnabled: boolean;
   useStream: boolean;
+  customTextApiUrl: string;
+  customTextApiKey: string;
+  customTextModel: string;
+  customTextExtraBody: string;
 }
 
 interface SettingsModalProps {
@@ -22,6 +30,10 @@ interface SettingsModalProps {
   geminiApiKey: string;
   deepseekApiKey: string;
   useStream: boolean;
+  customTextApiUrl: string;
+  customTextApiKey: string;
+  customTextModel: string;
+  customTextExtraBody: string;
   onSaveSettings: (settings: SettingsPayload) => void;
   isModalOpen: boolean;
   onModalClose: () => void;
@@ -33,6 +45,10 @@ export default function SettingsModal({
   geminiApiKey,
   deepseekApiKey,
   useStream,
+  customTextApiUrl,
+  customTextApiKey,
+  customTextModel,
+  customTextExtraBody,
   onSaveSettings,
   isModalOpen,
   onModalClose
@@ -43,7 +59,12 @@ export default function SettingsModal({
   const [geminiKey, setGeminiKey] = useState(geminiApiKey);
   const [deepseekKey, setDeepseekKey] = useState(deepseekApiKey);
   const [streamEnabled, setStreamEnabled] = useState(useStream);
+  const [customUrl, setCustomUrl] = useState(customTextApiUrl);
+  const [customKey, setCustomKey] = useState(customTextApiKey);
+  const [customModelName, setCustomModelName] = useState(customTextModel);
+  const [customExtra, setCustomExtra] = useState(customTextExtraBody);
   const [status, setStatus] = useState('');
+  const [customExtraError, setCustomExtraError] = useState('');
 
   useEffect(() => {
     setSelectedProvider(aiProvider);
@@ -51,8 +72,13 @@ export default function SettingsModal({
     setGeminiKey(geminiApiKey);
     setDeepseekKey(deepseekApiKey);
     setStreamEnabled(useStream);
+    setCustomUrl(customTextApiUrl);
+    setCustomKey(customTextApiKey);
+    setCustomModelName(customTextModel);
+    setCustomExtra(customTextExtraBody);
+    setCustomExtraError('');
     setStatus('');
-  }, [aiProvider, aiModel, geminiApiKey, deepseekApiKey, useStream, isModalOpen]);
+  }, [aiProvider, aiModel, geminiApiKey, deepseekApiKey, useStream, customTextApiUrl, customTextApiKey, customTextModel, customTextExtraBody, isModalOpen]);
 
   const handleOutsideClick = (e: React.MouseEvent<HTMLDivElement>) => {
     if (e.target === e.currentTarget) {
@@ -60,19 +86,34 @@ export default function SettingsModal({
     }
   };
 
-  const currentApiKey = selectedProvider === 'gemini' ? geminiKey : deepseekKey;
+  const isCustom = selectedProvider === CUSTOM_TEXT_PROVIDER;
+  const currentApiKey = selectedProvider === 'gemini' ? geminiKey : isCustom ? customKey : deepseekKey;
   const currentModelName = getModelName(selectedProvider, selectedModel);
   const currentModelOptions = selectedProvider === 'deepseek' ? DEEPSEEK_MODEL_OPTIONS : GEMINI_MODEL_OPTIONS;
 
   const setCurrentApiKey = (value: string) => {
     if (selectedProvider === 'gemini') {
       setGeminiKey(value);
+    } else if (isCustom) {
+      setCustomKey(value);
     } else {
       setDeepseekKey(value);
     }
   };
 
+  const handleCustomExtraChange = (value: string) => {
+    setCustomExtra(value);
+    const { error } = parseCustomExtraBody(value);
+    setCustomExtraError(error || '');
+  };
+
   const handleSaveSettings = () => {
+    const { error } = parseCustomExtraBody(customExtra);
+    if (error && isCustom) {
+      setCustomExtraError(error);
+      return;
+    }
+
     onSaveSettings({
       aiProvider: selectedProvider,
       aiModel: currentModelName,
@@ -80,6 +121,10 @@ export default function SettingsModal({
       deepseekApiKey: deepseekKey.trim(),
       deepseekThinkingEnabled: false,
       useStream: streamEnabled,
+      customTextApiUrl: customUrl.trim(),
+      customTextApiKey: customKey.trim(),
+      customTextModel: customModelName.trim(),
+      customTextExtraBody: customExtra.trim(),
     });
 
     setStatus('设置已保存');
@@ -119,14 +164,14 @@ export default function SettingsModal({
             <label className="mb-2 block text-sm font-medium" style={{ color: 'var(--ink-2)' }}>
               {t("模型服务")}
             </label>
-            <div className="segmented-control grid grid-cols-2 gap-1 rounded-[12px] p-1">
-              {(['gemini', 'deepseek'] as AIProvider[]).map((provider) => {
+            <div className="segmented-control grid grid-cols-3 gap-1 rounded-[12px] p-1">
+              {(['gemini', 'deepseek', CUSTOM_TEXT_PROVIDER] as AIProvider[]).map((provider) => {
                 const active = selectedProvider === provider;
                 return (
                   <button
                     key={provider}
                     type="button"
-                    className="inline-flex items-center justify-center gap-2 rounded-[10px] px-3 py-2 text-sm font-medium transition-colors"
+                    className="inline-flex items-center justify-center gap-1.5 rounded-[10px] px-2 py-2 text-sm font-medium transition-colors"
                     aria-pressed={active}
                     style={{
                       background: active ? 'var(--bg-2)' : 'transparent',
@@ -135,42 +180,109 @@ export default function SettingsModal({
                     }}
                     onClick={() => setSelectedProvider(provider)}
                   >
-                    <ProviderLogo provider={provider} />
-                    {PROVIDER_LABELS[provider]}
+                    {provider === CUSTOM_TEXT_PROVIDER
+                      ? <span className="text-xs">⌨️</span>
+                      : <ProviderLogo provider={provider} />}
+                    <span className="truncate">{PROVIDER_LABELS[provider]}</span>
                   </button>
                 );
               })}
             </div>
           </div>
 
-          <div className="mb-4">
-            <label htmlFor="modalModelSelect" className="mb-1.5 block text-sm font-medium" style={{ color: 'var(--ink-2)' }}>
-              {t("模型版本")}
-            </label>
-            <select
-              id="modalModelSelect"
-              className="nd-input"
-              value={currentModelName}
-              onChange={(e) => setSelectedModel(getModelName(selectedProvider, e.target.value))}
-            >
-              {currentModelOptions.map((model) => (
-                <option key={model} value={model}>{model}</option>
-              ))}
-            </select>
-          </div>
+          {isCustom ? (
+            <>
+              <div className="mb-4">
+                <label htmlFor="customApiUrlInput" className="mb-1.5 block text-sm font-medium" style={{ color: 'var(--ink-2)' }}>
+                  {t("API 地址（OpenAI 兼容）")}
+                </label>
+                <input
+                  type="text"
+                  id="customApiUrlInput"
+                  className="nd-input"
+                  placeholder="https://openrouter.ai/api/v1"
+                  value={customUrl}
+                  onChange={(e) => setCustomUrl(e.target.value)}
+                />
+              </div>
 
-          <div className="mb-4">
-            <label htmlFor="modalApiKeyInput" className="mb-1.5 block text-sm font-medium" style={{ color: 'var(--ink-2)' }}>
-              {PROVIDER_LABELS[selectedProvider]} {t("API 密钥（可选）")}</label>
-            <input
-              type="password"
-              id="modalApiKeyInput"
-              className="nd-input"
-              placeholder={t("留空使用默认配置")}
-              value={currentApiKey}
-              onChange={(e) => setCurrentApiKey(e.target.value)}
-            />
-          </div>
+              <div className="mb-4">
+                <label htmlFor="customApiKeyInput" className="mb-1.5 block text-sm font-medium" style={{ color: 'var(--ink-2)' }}>
+                  {t("API 密钥")}
+                </label>
+                <input
+                  type="password"
+                  id="customApiKeyInput"
+                  className="nd-input"
+                  placeholder="sk-..."
+                  value={customKey}
+                  onChange={(e) => setCustomKey(e.target.value)}
+                />
+              </div>
+
+              <div className="mb-4">
+                <label htmlFor="customModelInput" className="mb-1.5 block text-sm font-medium" style={{ color: 'var(--ink-2)' }}>
+                  {t("模型名称")}
+                </label>
+                <input
+                  type="text"
+                  id="customModelInput"
+                  className="nd-input"
+                  placeholder="google/gemini-2.0-flash-001"
+                  value={customModelName}
+                  onChange={(e) => setCustomModelName(e.target.value)}
+                />
+              </div>
+
+              <div className="mb-4">
+                <label htmlFor="customExtraBodyInput" className="mb-1.5 block text-sm font-medium" style={{ color: 'var(--ink-2)' }}>
+                  {t("额外请求体（JSON，可选）")}
+                </label>
+                <textarea
+                  id="customExtraBodyInput"
+                  className="nd-input font-mono text-xs"
+                  rows={4}
+                  placeholder={'{ "temperature": 0.3, "max_tokens": 4096 }'}
+                  value={customExtra}
+                  onChange={(e) => handleCustomExtraChange(e.target.value)}
+                />
+                {customExtraError && (
+                  <p className="m-0 mt-1 text-xs" style={{ color: 'var(--neg, #d0342c)' }}>{customExtraError}</p>
+                )}
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="mb-4">
+                <label htmlFor="modalModelSelect" className="mb-1.5 block text-sm font-medium" style={{ color: 'var(--ink-2)' }}>
+                  {t("模型版本")}
+                </label>
+                <select
+                  id="modalModelSelect"
+                  className="nd-input"
+                  value={currentModelName}
+                  onChange={(e) => setSelectedModel(getModelName(selectedProvider, e.target.value))}
+                >
+                  {currentModelOptions.map((model) => (
+                    <option key={model} value={model}>{model}</option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="mb-4">
+                <label htmlFor="modalApiKeyInput" className="mb-1.5 block text-sm font-medium" style={{ color: 'var(--ink-2)' }}>
+                  {PROVIDER_LABELS[selectedProvider]} {t("API 密钥（可选）")}</label>
+                <input
+                  type="password"
+                  id="modalApiKeyInput"
+                  className="nd-input"
+                  placeholder={t("留空使用默认配置")}
+                  value={currentApiKey}
+                  onChange={(e) => setCurrentApiKey(e.target.value)}
+                />
+              </div>
+            </>
+          )}
         </div>
 
         <div className="settings-group" role="group" aria-label={t("输出方式")}>

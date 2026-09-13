@@ -2,7 +2,7 @@ import { getResponseLanguageInstruction } from '../../lib/languagePrompts';
 import { normalizeLocale } from '../../i18n';
 import { NextRequest, NextResponse } from 'next/server';
 import { proxyOpenAICompatibleRequest } from '../_utils/openaiProxy';
-import { ProviderConfigError, resolveProviderConfig, withProviderControls } from '../_utils/providerConfig';
+import { ProviderConfigError, resolveRequestProviderConfig, withProviderControls } from '../_utils/providerConfig';
 import { requireApiSession } from '../_utils/sessionAuth';
 
 export async function POST(req: NextRequest) {
@@ -21,8 +21,12 @@ export async function POST(req: NextRequest) {
       stream = false,
       provider,
       thinkingEnabled = false,
+      customApiUrl,
+      customApiKey,
+      customModel,
+      customExtraBody,
     } = requestData;
-    const providerConfig = resolveProviderConfig(req, { provider, apiUrl, model });
+    const providerConfig = resolveRequestProviderConfig(req, { provider, apiUrl, model, customApiUrl, customApiKey, customModel, customExtraBody });
     
     if (!providerConfig.apiKey) {
       return NextResponse.json(
@@ -46,6 +50,7 @@ export async function POST(req: NextRequest) {
     }, {
       structuredOutput: 'analysisTokens',
       enableThinking: thinkingEnabled === true,
+      customExtraBody: providerConfig.customExtraBody,
     });
 
     const proxied = await proxyOpenAICompatibleRequest({

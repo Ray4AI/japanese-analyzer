@@ -6,8 +6,9 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { getWordDetails, parseWordDetailResponseContent, streamWordDetails, type WordDetail, type AIModelName, type AIProvider } from '../services/api';
 import { normalizeEscapedLineBreaks } from '../utils/markdown';
 import { getLocalRomaji } from '../utils/romaji';
+import type { CustomTextConfig } from '../lib/customProvider';
 
-interface UseWordDetailOptions { userApiKey?: string; aiProvider: AIProvider; aiModel: AIModelName; useStream?: boolean; }
+interface UseWordDetailOptions { userApiKey?: string; aiProvider: AIProvider; aiModel: AIModelName; useStream?: boolean; customTextConfig?: CustomTextConfig; }
 interface FetchWordDetailsOptions { force?: boolean; }
 
 function partialField(content: string, name: string, completeOnly = false): string {
@@ -30,7 +31,7 @@ function partialField(content: string, name: string, completeOnly = false): stri
   catch { return ''; }
 }
 
-export function useWordDetail({ userApiKey, aiProvider, aiModel, useStream = true }: UseWordDetailOptions) {
+export function useWordDetail({ userApiKey, aiProvider, aiModel, useStream = true, customTextConfig }: UseWordDetailOptions) {
   const { t, locale } = useLanguage();
   const [wordDetail, setWordDetail] = useState<WordDetail | null>(null);
   const [isLoading, setIsLoading] = useState(false);
@@ -48,16 +49,18 @@ export function useWordDetail({ userApiKey, aiProvider, aiModel, useStream = tru
     setStreamContent(''); setStreamError('');
   }, []);
 
+  const customTextConfigJson = JSON.stringify(customTextConfig ?? null);
+
   useEffect(() => {
     cacheRef.current.clear();
     clearWordDetail();
     return () => { activeRef.current?.controller.abort(); activeRef.current = null; };
-  }, [userApiKey, aiProvider, aiModel, useStream, clearWordDetail, locale]);
+  }, [userApiKey, aiProvider, aiModel, useStream, clearWordDetail, locale, customTextConfigJson]);
 
   const fetchWordDetails = useCallback(async (
     word: string, pos: string, sentence: string, furigana?: string, options: FetchWordDetailsOptions = {}
   ) => {
-    const key = JSON.stringify([locale, aiProvider, aiModel, sentence, word, pos, furigana || '']);
+    const key = JSON.stringify([locale, aiProvider, aiModel, sentence, word, pos, furigana || '', customTextConfigJson]);
     if (!options.force && activeRef.current?.key === key) return;
     activeRef.current?.controller.abort();
     activeRef.current = null;
@@ -111,7 +114,7 @@ export function useWordDetail({ userApiKey, aiProvider, aiModel, useStream = tru
     } catch (error) {
       if (isCurrent()) fail(error instanceof Error ? error : new Error(t("查询释义失败")));
     }
-  }, [userApiKey, aiProvider, aiModel, useStream, locale, t]);
+  }, [userApiKey, aiProvider, aiModel, useStream, locale, t, customTextConfigJson]);
 
   return { wordDetail, isLoading, isStreamLoading, streamContent, streamError, fetchWordDetails, clearWordDetail };
 }

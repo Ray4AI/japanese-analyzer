@@ -1,5 +1,6 @@
 // 工具函数
 import { synthesizeSpeech, type TTSProvider } from '../services/api';
+import type { CustomTtsConfig } from '../lib/customProvider';
 
 // 检查字符串是否包含汉字
 export function containsKanji(text: string): boolean {
@@ -129,12 +130,18 @@ export async function getJapaneseTtsAudioUrl(
   text: string, 
   apiKey?: string, 
   provider: TTSProvider = 'edge',
-  options: { gender?: 'male' | 'female'; voice?: string; rate?: number; pitch?: number } = {}
+  options: {
+    gender?: 'male' | 'female';
+    voice?: string;
+    rate?: number;
+    pitch?: number;
+    /** 自用：自定义 OpenAI 兼容语音端点配置 */
+    custom?: CustomTtsConfig;
+  } = {}
 ): Promise<string> {
   const { audio, mimeType } = await synthesizeSpeech(text, provider, options, apiKey);
-  return provider === 'edge' ? 
-    createPlayableUrlFromAudio(audio, mimeType) : 
-    createPlayableUrlFromPcm(audio, mimeType);
+  if (provider === 'gemini') return createPlayableUrlFromPcm(audio, mimeType);
+  return createPlayableUrlFromAudio(audio, mimeType);
 }
 
 // 将 Base64 音频数据转换为可播放的 URL (Edge TTS用)

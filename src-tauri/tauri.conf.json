@@ -1,0 +1,39 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "japanese-analyzer",
+  "version": "0.1.0",
+  "identifier": "com.cokice.japanese-analyzer",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "node scripts/build-static.mjs",
+    "devUrl": "http://localhost:3000",
+    "frontendDist": "../out"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "日本語文章解析",
+        "width": 1480,
+        "height": 960,
+        "minWidth": 480,
+        "minHeight": 640,
+        "center": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "icon": [
+      "icons/icon.ico"
+    ],
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    }
+  }
+}

@@ -1,7 +1,7 @@
 import { normalizeLocale } from '../../i18n';
 import { NextRequest, NextResponse } from 'next/server';
 import { proxyOpenAICompatibleRequest } from '../_utils/openaiProxy';
-import { ProviderConfigError, resolveProviderConfig, withProviderControls } from '../_utils/providerConfig';
+import { ProviderConfigError, resolveRequestProviderConfig, withProviderControls } from '../_utils/providerConfig';
 import { requireApiSession } from '../_utils/sessionAuth';
 import { getWordDetailSystemPrompt } from '../../lib/wordDetailPrompt';
 
@@ -12,8 +12,8 @@ export async function POST(req: NextRequest) {
     if (authError) return authError;
 
     // 解析请求体
-    const { word, pos, sentence, furigana, model, apiUrl, useStream = false, provider } = await req.json();
-    const providerConfig = resolveProviderConfig(req, { provider, apiUrl, model });
+    const { word, pos, sentence, furigana, model, apiUrl, useStream = false, provider, customApiUrl, customApiKey, customModel, customExtraBody } = await req.json();
+    const providerConfig = resolveRequestProviderConfig(req, { provider, apiUrl, model, customApiUrl, customApiKey, customModel, customExtraBody });
     
     if (!providerConfig.apiKey) {
       return NextResponse.json(
@@ -36,7 +36,7 @@ export async function POST(req: NextRequest) {
         { role: "user", content: JSON.stringify({ word, pos, sentence, furigana: furigana || "" }) },
       ],
       stream: useStream,
-    }, { structuredOutput: 'wordDetail' });
+    }, { structuredOutput: 'wordDetail', customExtraBody: providerConfig.customExtraBody });
 
     const proxied = await proxyOpenAICompatibleRequest({
       url: providerConfig.apiUrl,

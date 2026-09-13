@@ -2,6 +2,9 @@ import assert from 'assert';
 import './readingLayout.test';
 import './wordDetailContext.test';
 import './wordDetailDictionary.test';
+import { runCustomProviderTests } from './customProvider.test';
+
+runCustomProviderTests();
 import { runLocalOutputTests } from './localOutput.test';
 import { runRequestMetricsTests } from './requestMetrics.test';
 import {

@@ -1,5 +1,14 @@
 import { createTranslator, getClientLocale } from '../i18n';
-// API与分析相关的服务函数
+import { getResponseLanguageInstruction, getTranslationSystemPrompt, getChatSystemPrompt, getImageExtractionPrompt } from '../lib/languagePrompts';
+import { getWordDetailSystemPrompt } from '../lib/wordDetailPrompt';
+import { resolveTextUpstreamUrl, withProviderControls as buildUpstreamPayload } from '../lib/upstreamPayload';
+import {
+  CUSTOM_TEXT_PROVIDER,
+  CUSTOM_TTS_STORAGE_KEYS,
+  loadCustomTextConfig,
+  resolveCustomTextUrl,
+  resolveCustomTtsUrl,
+} from '../lib/customProvider';
 import {
   DEFAULT_AI_PROVIDER,
   getModelName,
@@ -56,7 +65,7 @@ export interface ChatMessage {
   content: string;
 }
 
-export type TTSProvider = 'edge' | 'gemini';
+export type TTSProvider = 'edge' | 'gemini' | 'custom-openai-tts';
 
 export interface StorageLike {
   getItem: (key: string) => string | null;
@@ -90,6 +99,128 @@ function isAbortError(error: unknown): boolean {
 
 const ANALYSIS_CHUNK_CONCURRENCY = 3;
 
+// —— 自用：Tauri 桌面端直连模式 ——
+// 静态导出没有 Next API 路由，前端直接调用上游 OpenAI 兼容接口。
+// Tauri 通过 tauri-plugin-http 绕过 CORS；普通浏览器仍然走 /api 代理。
+
+export function isTauriDirectMode(): boolean {
+  return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+}
+
+let tauriFetchPromise: Promise<typeof fetch | null> | null = null;
+
+/** 加载 Tauri HTTP 插件的 fetch（绕过 CORS）。非 Tauri 环境返回 null。 */
+function loadTauriFetch(): Promise<typeof fetch | null> {
+  if (!isTauriDirectMode()) return Promise.resolve(null);
+  if (!tauriFetchPromise) {
+    tauriFetchPromise = import('@tauri-apps/plugin-http')
+      .then((mod) => mod.fetch as typeof fetch)
+      .catch((error) => {
+        console.warn('Tauri HTTP 插件加载失败，回退浏览器 fetch：', error);
+        return null;
+      });
+  }
+  return tauriFetchPromise;
+}
+
+/** 直连模式下优先使用 Tauri HTTP 插件发起请求（绕过 CORS）。 */
+async function directFetch(url: string, init: RequestInit): Promise<Response> {
+  const tauriFetch = await loadTauriFetch();
+  if (tauriFetch) return tauriFetch(url, init);
+  return fetch(url, init);
+}
+
+interface DirectUpstreamRequest {
+  provider: AIProvider;
+  model?: string | null;
+  payloadExtras?: Record<string, unknown>;
+  structuredOutput?: 'analysisTokens' | 'wordDetail';
+  enableThinking?: boolean;
+  stream?: boolean;
+  signal?: AbortSignal;
+}
+
+/** 读取自定义文本端点配置（浏览器端）。 */
+function readCustomTextConfig() {
+  if (typeof localStorage === 'undefined') {
+    return { apiUrl: '', apiKey: '', model: '', extraBody: '' };
+  }
+  return loadCustomTextConfig(localStorage);
+}
+
+/**
+ * 直连模式：构造 OpenAI 兼容 chat/completions 请求并返回上游 Response。
+ * custom-openai 使用用户配置；gemini/deepseek 使用官方端点 + localStorage 密钥。
+ */
+async function directChatCompletion(
+  messages: Array<{ role: string; content: unknown }>,
+  options: DirectUpstreamRequest
+): Promise<Response> {
+  const { provider, model, structuredOutput, enableThinking, stream = false, signal } = options;
+
+  let apiUrl: string;
+  let apiKey: string;
+  let modelName: string;
+  let customExtraBody: string | null = null;
+
+  if (provider === CUSTOM_TEXT_PROVIDER) {
+    const config = readCustomTextConfig();
+    if (!config.apiUrl || !config.apiKey) {
+      throw new Error('未配置自定义端点：请在设置中填写 API 地址与密钥。');
+    }
+    apiUrl = resolveCustomTextUrl(config.apiUrl);
+    apiKey = config.apiKey;
+    modelName = config.model || model || 'default';
+    customExtraBody = config.extraBody || null;
+  } else if (provider === 'deepseek') {
+    apiUrl = resolveTextUpstreamUrl('deepseek');
+    apiKey = readStoredKey('deepseekApiKey');
+    modelName = getModelName('deepseek', model);
+    if (!apiKey) throw new Error('未配置 DeepSeek API 密钥。');
+  } else {
+    apiUrl = resolveTextUpstreamUrl('gemini');
+    apiKey = readStoredKey('geminiApiKey') || readStoredKey('userApiKey');
+    modelName = getModelName('gemini', model);
+    if (!apiKey) throw new Error('未配置 Gemini API 密钥。');
+  }
+
+  const payload = buildUpstreamPayload(provider, {
+    model: modelName,
+    messages,
+    stream,
+  }, {
+    structuredOutput,
+    enableThinking,
+    customExtraBody,
+  });
+
+  return directFetch(apiUrl, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify(payload),
+    signal,
+  });
+}
+
+function readStoredKey(key: string): string {
+  if (typeof localStorage === 'undefined') return '';
+  return localStorage.getItem(key) || '';
+}
+
+/** 直连模式通用错误处理（非 2xx 抛错）。 */
+async function ensureDirectOk(response: Response, label: string): Promise<Response> {
+  if (response.ok) return response;
+  const data = await response.json().catch(() => null) as { error?: { message?: string } | string } | null;
+  const message = typeof data?.error === 'string'
+    ? data.error
+    : data?.error?.message
+      || `${label}失败（HTTP ${response.status}）`;
+  throw new Error(message);
+}
+
 // 默认API地址 - 使用本地API路由
 export const DEFAULT_API_URL = "/api";
 const GEMINI_TTS_MODEL_NAME = 'gemini-3.1-flash-tts-preview';
@@ -101,17 +232,38 @@ const EDGE_TTS_VOICES = {
 };
 
 export function getTtsModelName(provider: TTSProvider = 'edge'): string {
+  if (provider === 'custom-openai-tts') {
+    if (typeof localStorage === 'undefined') return 'custom-openai-tts';
+    return localStorage.getItem(CUSTOM_TTS_STORAGE_KEYS.model) || 'custom-openai-tts';
+  }
   return provider === 'gemini' ? GEMINI_TTS_MODEL_NAME : EDGE_TTS_MODEL_NAME;
+}
+
+/** 读取客户端保存的自定义文本端点配置（仅浏览器端调用）。 */
+function getCustomTextRequestFields(): Record<string, string> {
+  if (typeof localStorage === 'undefined') return {};
+  const config = loadCustomTextConfig(localStorage);
+  return {
+    customApiUrl: config.apiUrl,
+    customApiKey: config.apiKey,
+    customModel: config.model,
+    customExtraBody: config.extraBody,
+  };
 }
 
 export function getRequestProviderPayload(
   provider: AIProvider = DEFAULT_AI_PROVIDER,
   model?: string | null
 ) {
-  return {
+  const payload: Record<string, unknown> = {
     provider,
     model: getModelName(provider, model),
   };
+
+  if (provider === CUSTOM_TEXT_PROVIDER) {
+    return { ...payload, ...getCustomTextRequestFields() };
+  }
+  return payload;
 }
 
 export function loadAISettingsFromStorage(storage: StorageLike): StoredAISettings {
@@ -806,6 +958,28 @@ async function analyzeSingleSentence(
 
   try {
     const protectedInput = protectAnalysisUrls(sentence);
+
+    // Tauri 直连模式
+    if (isTauriDirectMode()) {
+      const response = await directChatCompletion([
+        { role: 'system', content: getResponseLanguageInstruction(getClientLocale()) },
+        { role: 'user', content: buildAnalyzePrompt(protectedInput.text, protectedInput.instruction) },
+      ], {
+        provider,
+        model,
+        structuredOutput: 'analysisTokens',
+        enableThinking: provider === 'deepseek' && options.deepseekThinkingEnabled === true,
+        stream: false,
+        signal: options.signal,
+      });
+      await ensureDirectOk(response, '解析');
+      const result = await response.json();
+      const content = result?.choices?.[0]?.message?.content;
+      if (typeof content !== 'string') throw new InvalidResponseError('解析结果格式错误，请重试');
+      const tokens = parseAnalyzeResponseContent(protectedInput.restoreContent(content));
+      return reconcileChunkReconstruction({ text: sentence, start: 0, end: sentence.length, sentenceCount: 0, overLimit: false }, tokens, 0, 1);
+    }
+
     const apiUrl = getApiEndpoint('/analyze');
     const headers = getHeaders(userApiKey);
     
@@ -925,6 +1099,46 @@ async function streamAnalyzeSingleSentence(
 
   try {
     const protectedInput = protectAnalysisUrls(sentence);
+
+    // Tauri 直连模式：直连 chat/completions 流式请求
+    if (isTauriDirectMode()) {
+      const response = await directChatCompletion([
+        { role: 'system', content: getResponseLanguageInstruction(getClientLocale()) },
+        { role: 'user', content: buildAnalyzePrompt(protectedInput.text, protectedInput.instruction) },
+      ], {
+        provider,
+        model,
+        structuredOutput: 'analysisTokens',
+        enableThinking: provider === 'deepseek' && options.deepseekThinkingEnabled === true,
+        stream: true,
+        signal: options.signal,
+      });
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        onError(new ApiRequestError(`流式解析失败：${errorData.error?.message || response.statusText || '未知错误'}`, response.status));
+        return;
+      }
+      const parseContent = (content: string) => {
+        const tokens = parseAnalyzeResponseContent(protectedInput.restoreContent(content));
+        return reconcileChunkReconstruction({ text: sentence, start: 0, end: sentence.length, sentenceCount: 0, overLimit: false }, tokens, 0, 1);
+      };
+      await readOpenAIContentStream(response, (content, done) => {
+        onChunk(done
+          ? JSON.stringify({ tokens: parseContent(content) })
+          : protectedInput.restoreContent(content), done);
+      }, onError, {
+        debounceMs: 40,
+        signal: options.signal,
+        parseWarning: 'Failed to parse streaming JSON chunk:',
+        validateFinalContent: parseContent,
+        invalidContentMessage: '句子解析结果没有完整生成，请重新解析。',
+        completionLabel: '句子解析',
+        onReasoning: options.onReasoning,
+        onContentStart: options.onContentStart,
+      });
+      return;
+    }
+
     const apiUrl = getApiEndpoint('/analyze');
     const headers = getHeaders(userApiKey);
     
@@ -1150,6 +1364,25 @@ export async function streamTranslateText(
   signal?: AbortSignal
 ): Promise<void> {
   try {
+    // Tauri 直连模式
+    if (isTauriDirectMode()) {
+      const response = await directChatCompletion([
+        { role: 'system', content: getTranslationSystemPrompt(getClientLocale()) },
+        { role: 'user', content: japaneseText },
+      ], { provider, model, stream: true, signal });
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        onError(new Error(`流式翻译失败：${errorData.error?.message || response.statusText || '未知错误'}`));
+        return;
+      }
+      await readOpenAIContentStream(response, onChunk, onError, {
+        signal,
+        debounceMs: 60,
+        parseWarning: 'Failed to parse streaming JSON chunk:',
+      });
+      return;
+    }
+
     const apiUrl = getApiEndpoint('/translate');
     const headers = getHeaders(userApiKey);
     
@@ -1195,6 +1428,19 @@ export async function getWordDetails(
   signal?: AbortSignal
 ): Promise<WordDetail> {
   try {
+    // Tauri 直连模式
+    if (isTauriDirectMode()) {
+      const response = await directChatCompletion([
+        { role: 'system', content: getWordDetailSystemPrompt(getClientLocale()) },
+        { role: 'user', content: JSON.stringify({ word, pos, sentence, furigana: furigana || '' }) },
+      ], { provider, model, structuredOutput: 'wordDetail', stream: false, signal });
+      await ensureDirectOk(response, '查询释义');
+      const result = await response.json();
+      const content = result?.choices?.[0]?.message?.content;
+      if (typeof content !== 'string') throw new Error('释义结果格式错误');
+      return parseWordDetailResponseContent(content, { word, pos, furigana });
+    }
+
     const apiUrl = getApiEndpoint('/word-detail');
     const headers = getHeaders(userApiKey);
     
@@ -1252,6 +1498,28 @@ export async function streamWordDetails(
   signal?: AbortSignal
 ): Promise<void> {
   try {
+    // Tauri 直连模式
+    if (isTauriDirectMode()) {
+      const response = await directChatCompletion([
+        { role: 'system', content: getWordDetailSystemPrompt(getClientLocale()) },
+        { role: 'user', content: JSON.stringify({ word, pos, sentence, furigana: furigana || '' }) },
+      ], { provider, model, structuredOutput: 'wordDetail', stream: true, signal });
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        onError(new Error(`流式查询释义失败：${errorData.error?.message || response.statusText || '未知错误'}`));
+        return;
+      }
+      await readOpenAIContentStream(response, onChunk, onError, {
+        signal,
+        debounceMs: 50,
+        parseWarning: '解析流式数据时出错:',
+        validateFinalContent: content => parseWordDetailResponseContent(content, { word, pos, furigana }),
+        invalidContentMessage: '词语详解没有完整生成，请重新生成。',
+        completionLabel: '词语详解',
+      });
+      return;
+    }
+
     const apiUrl = getApiEndpoint('/word-detail');
     const headers = getHeaders(userApiKey);
     
@@ -1301,6 +1569,19 @@ export async function translateText(
   signal?: AbortSignal
 ): Promise<string> {
   try {
+    // Tauri 直连模式
+    if (isTauriDirectMode()) {
+      const response = await directChatCompletion([
+        { role: 'system', content: getTranslationSystemPrompt(getClientLocale()) },
+        { role: 'user', content: japaneseText },
+      ], { provider, model, stream: false, signal });
+      await ensureDirectOk(response, '翻译');
+      const result = await response.json();
+      const content = result?.choices?.[0]?.message?.content;
+      if (typeof content !== 'string') throw new Error('翻译结果格式错误');
+      return content.trim();
+    }
+
     const apiUrl = getApiEndpoint('/translate');
     const headers = getHeaders(userApiKey);
     
@@ -1342,6 +1623,23 @@ export async function extractTextFromImage(
   provider: AIProvider = DEFAULT_AI_PROVIDER
 ): Promise<string> {
   try {
+    // Tauri 直连模式
+    if (isTauriDirectMode()) {
+      const model = provider === 'custom-openai' ? readCustomTextConfig().model : undefined;
+      const response = await directChatCompletion([{
+        role: 'user',
+        content: [
+          { type: 'text', text: prompt || getImageExtractionPrompt(getClientLocale()) },
+          { type: 'image_url', image_url: { url: imageData } },
+        ],
+      }], { provider, model, enableThinking: false, stream: false });
+      await ensureDirectOk(response, '图片文字提取');
+      const result = await response.json();
+      const content = result?.choices?.[0]?.message?.content;
+      if (typeof content !== 'string') throw new Error('图片文字提取结果格式错误');
+      return content.trim();
+    }
+
     const apiUrl = getApiEndpoint('/image-to-text');
     const headers = getHeaders(userApiKey);
     
@@ -1385,6 +1683,28 @@ export async function streamExtractTextFromImage(
   provider: AIProvider = DEFAULT_AI_PROVIDER
 ): Promise<void> {
   try {
+    // Tauri 直连模式
+    if (isTauriDirectMode()) {
+      const model = provider === 'custom-openai' ? readCustomTextConfig().model : undefined;
+      const response = await directChatCompletion([{
+        role: 'user',
+        content: [
+          { type: 'text', text: prompt || getImageExtractionPrompt(getClientLocale()) },
+          { type: 'image_url', image_url: { url: imageData } },
+        ],
+      }], { provider, model, enableThinking: false, stream: true });
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        onError(new Error(`流式图片文字提取失败：${errorData.error?.message || response.statusText || '未知错误'}`));
+        return;
+      }
+      await readOpenAIContentStream(response, onChunk, onError, {
+        debounceMs: 16,
+        parseWarning: 'Failed to parse streaming JSON chunk:',
+      });
+      return;
+    }
+
     const apiUrl = getApiEndpoint('/image-to-text');
     const headers = getHeaders(userApiKey);
     
@@ -1432,10 +1752,78 @@ function arrayBufferToBase64(buffer: ArrayBuffer): string {
 export async function synthesizeSpeech(
   text: string,
   provider: TTSProvider = 'edge',
-  options: { gender?: 'male' | 'female'; voice?: string; rate?: number; pitch?: number } = {},
+  options: {
+    gender?: 'male' | 'female';
+    voice?: string;
+    rate?: number;
+    pitch?: number;
+    /** 自用：自定义 OpenAI 兼容语音端点配置 */
+    custom?: { apiUrl: string; apiKey: string; model: string; voice: string; speed: number; format: string; extraBody: string };
+  } = {},
   userApiKey?: string
 ): Promise<{ audio: string; mimeType: string }> {
-  const { gender = 'female', voice = 'Kore', rate = 0, pitch = 0 } = options;
+  const { gender = 'female', voice = 'Kore', rate = 0, pitch = 0, custom } = options;
+
+  if (provider === 'custom-openai-tts') {
+    // Tauri 直连模式：浏览器 fetch 直连 OpenAI 兼容 /audio/speech
+    if (isTauriDirectMode()) {
+      if (!custom?.apiUrl || !custom?.apiKey || !custom?.model) {
+        throw new Error('未配置自定义语音端点：请在语音设置中填写地址、密钥和模型。');
+      }
+      let extra: Record<string, unknown> = {};
+      if (custom.extraBody?.trim()) {
+        try {
+          const parsed = JSON.parse(custom.extraBody);
+          if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) extra = parsed;
+        } catch { /* 直连模式下忽略无效 JSON，交给上游校验 */ }
+      }
+      const payload = {
+        model: custom.model,
+        input: text,
+        response_format: custom.format || 'mp3',
+        ...(custom.voice ? { voice: custom.voice } : {}),
+        ...(custom.speed > 0 ? { speed: custom.speed } : {}),
+        ...extra,
+      };
+      const response = await directFetch(resolveCustomTtsUrl(custom.apiUrl), {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${custom.apiKey}`,
+        },
+        body: JSON.stringify(payload),
+      });
+      await ensureDirectOk(response, '自定义语音接口');
+      const buffer = await response.arrayBuffer();
+      if (!buffer.byteLength) throw new Error('自定义语音接口返回空音频');
+      const mimeType = response.headers.get('content-type') || (custom.format === 'pcm' ? 'audio/pcm' : 'audio/mpeg');
+      return { audio: arrayBufferToBase64(buffer), mimeType };
+    }
+
+    if (!custom) throw new Error('未配置自定义语音端点');
+    const response = await fetch(getApiEndpoint('/tts'), {
+      method: 'POST',
+      headers: getHeaders(),
+      body: JSON.stringify({
+        text,
+        provider: 'custom-openai-tts',
+        customApiUrl: custom.apiUrl,
+        customApiKey: custom.apiKey,
+        customModel: custom.model,
+        voice: custom.voice,
+        speed: custom.speed,
+        responseFormat: custom.format,
+        customExtraBody: custom.extraBody,
+      }),
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.error?.message || `自定义语音接口请求失败（HTTP ${response.status}）`.replace('{0}', String(response.status)));
+    }
+
+    return response.json();
+  }
 
   if (provider === 'edge') {
     const response = await fetch(EDGE_TTS_URL, {
@@ -1503,6 +1891,29 @@ export async function streamChat(
   signal?: AbortSignal
 ): Promise<void> {
   try {
+    // Tauri 直连模式
+    if (isTauriDirectMode()) {
+      const response = await directChatCompletion([
+        { role: 'system', content: getChatSystemPrompt(getClientLocale()) },
+        ...messages,
+      ], { provider, model, stream: true, signal });
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        onError(new ApiRequestError(`聊天失败：${errorData.error?.message || response.statusText || '未知错误'}`, response.status));
+        return;
+      }
+      await readOpenAIContentStream(response, onChunk, onError, {
+        signal,
+        debounceMs: 30,
+        parseWarning: '解析聊天流式数据时出错:',
+        validateFinalContent: content => {
+          if (!content.trim()) throw new InvalidResponseError('聊天回复为空');
+        },
+        invalidContentMessage: '聊天回复为空，请重试。',
+      });
+      return;
+    }
+
     const apiUrl = getApiEndpoint('/chat');
     const headers = getHeaders(userApiKey);
     
@@ -1551,6 +1962,19 @@ export async function sendChat(
   model?: string | null
 ): Promise<string> {
   try {
+    // Tauri 直连模式
+    if (isTauriDirectMode()) {
+      const response = await directChatCompletion([
+        { role: 'system', content: getChatSystemPrompt(getClientLocale()) },
+        ...messages,
+      ], { provider, model, stream: false });
+      await ensureDirectOk(response, '聊天');
+      const result = await response.json();
+      const content = result?.choices?.[0]?.message?.content;
+      if (typeof content !== 'string') throw new Error('聊天结果格式错误');
+      return content.trim();
+    }
+
     const apiUrl = getApiEndpoint('/chat');
     const headers = getHeaders(userApiKey);
     

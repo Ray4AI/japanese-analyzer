@@ -32,6 +32,12 @@ import {
   summarizeDeepSeekReasoningProgress,
   streamAnalyzeSentence
 } from './services/api';
+import {
+  CUSTOM_TEXT_PROVIDER,
+  CUSTOM_TEXT_STORAGE_KEYS,
+  loadCustomTextConfig,
+  loadCustomTtsConfig,
+} from './lib/customProvider';
 import { ReasoningSummaryController } from './utils/reasoningSummary';
 import { ReasoningTextStore } from './utils/reasoningTextStore';
 
@@ -68,13 +74,20 @@ export default function Home() {
   const reasoningSummaryControllerRef = useRef<ReasoningSummaryController | null>(null);
   const analysisAbortControllerRef = useRef<AbortController | null>(null);
   const [ttsProvider, setTtsProvider] = useState<TTSProvider>('edge');
+  // 自用：自定义 OpenAI 兼容端点配置（文本 / 语音）
+  const [customTextConfig, setCustomTextConfig] = useState<ReturnType<typeof loadCustomTextConfig>>({
+    apiUrl: '', apiKey: '', model: '', extraBody: '',
+  });
+  const [customTtsConfig, setCustomTtsConfig] = useState<ReturnType<typeof loadCustomTtsConfig>>({
+    apiUrl: '', apiKey: '', model: '', voice: '', speed: 1, format: 'mp3', extraBody: '',
+  });
 
   // 密码验证相关状态
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [requiresAuth, setRequiresAuth] = useState(false);
   const [authError, setAuthError] = useState('');
 
-  const userApiKey = aiProvider === 'gemini' ? geminiApiKey : deepseekApiKey;
+  const userApiKey = aiProvider === 'gemini' ? geminiApiKey : aiProvider === CUSTOM_TEXT_PROVIDER ? customTextConfig.apiKey : deepseekApiKey;
 
   // 选中词汇（右侧详情面板 / 移动端模态）
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
@@ -87,7 +100,7 @@ export default function Home() {
     streamError: wordDetailStreamError,
     fetchWordDetails,
     clearWordDetail,
-  } = useWordDetail({ userApiKey, aiProvider, aiModel, useStream });
+  } = useWordDetail({ userApiKey, aiProvider, aiModel, useStream, customTextConfig });
 
   useEffect(() => {
     analysisAbortControllerRef.current?.abort('language-change');
@@ -156,6 +169,8 @@ export default function Home() {
     setDeepseekApiKey(storedAISettings.deepseekApiKey);
     setDeepseekThinkingEnabled(storedAISettings.deepseekThinkingEnabled);
     setTtsProvider(storedTtsProvider);
+    setCustomTextConfig(loadCustomTextConfig(localStorage));
+    setCustomTtsConfig(loadCustomTtsConfig(localStorage));
 
     // 只有当明确设置了值时才更新，否则保持默认值
     if (storedUseStream !== null) {
@@ -171,6 +186,10 @@ export default function Home() {
     deepseekApiKey: string;
     deepseekThinkingEnabled: boolean;
     useStream: boolean;
+    customTextApiUrl: string;
+    customTextApiKey: string;
+    customTextModel: string;
+    customTextExtraBody: string;
   }) => {
     localStorage.setItem('aiProvider', settings.aiProvider);
     localStorage.setItem('aiModel', settings.aiModel);
@@ -178,6 +197,10 @@ export default function Home() {
     localStorage.setItem('deepseekApiKey', settings.deepseekApiKey);
     localStorage.setItem('deepseekThinkingEnabled', settings.deepseekThinkingEnabled.toString());
     localStorage.setItem('useStream', settings.useStream.toString());
+    localStorage.setItem(CUSTOM_TEXT_STORAGE_KEYS.apiUrl, settings.customTextApiUrl);
+    localStorage.setItem(CUSTOM_TEXT_STORAGE_KEYS.apiKey, settings.customTextApiKey);
+    localStorage.setItem(CUSTOM_TEXT_STORAGE_KEYS.model, settings.customTextModel);
+    localStorage.setItem(CUSTOM_TEXT_STORAGE_KEYS.extraBody, settings.customTextExtraBody);
     localStorage.removeItem('geminiApiUrl');
     localStorage.removeItem('deepseekApiUrl');
     localStorage.removeItem('userApiUrl');
@@ -191,6 +214,7 @@ export default function Home() {
     setDeepseekApiKey(settings.deepseekApiKey);
     setDeepseekThinkingEnabled(settings.deepseekThinkingEnabled);
     setUseStream(settings.useStream);
+    setCustomTextConfig(loadCustomTextConfig(localStorage));
     reasoningTextStore.reset();
     hasDeepseekReasoningRef.current = false;
     setHasDeepseekReasoning(false);
@@ -204,6 +228,11 @@ export default function Home() {
   const handleTtsProviderChange = (provider: TTSProvider) => {
     setTtsProvider(provider);
     localStorage.setItem('ttsProvider', provider);
+  };
+
+  // 自用：更新自定义语音端点配置（持久化在 CustomTtsSettings 内完成）
+  const handleCustomTtsConfigChange = (config: typeof customTtsConfig) => {
+    setCustomTtsConfig(config);
   };
 
   // 处理密码验证
@@ -495,6 +524,8 @@ export default function Home() {
               useStream={useStream}
               ttsProvider={ttsProvider}
               onTtsProviderChange={handleTtsProviderChange}
+              customTtsConfig={customTtsConfig}
+              onCustomTtsConfigChange={handleCustomTtsConfigChange}
               isAnalyzing={isAnalyzing}
             />
 
@@ -585,6 +616,10 @@ export default function Home() {
           geminiApiKey={geminiApiKey}
           deepseekApiKey={deepseekApiKey}
           useStream={useStream}
+          customTextApiUrl={customTextConfig.apiUrl}
+          customTextApiKey={customTextConfig.apiKey}
+          customTextModel={customTextConfig.model}
+          customTextExtraBody={customTextConfig.extraBody}
           onSaveSettings={handleSaveSettings}
           isModalOpen={isSettingsModalOpen}
           onModalClose={() => setIsSettingsModalOpen(!isSettingsModalOpen)}

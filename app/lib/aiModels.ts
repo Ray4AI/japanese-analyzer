@@ -1,4 +1,4 @@
-export type AIProvider = 'gemini' | 'deepseek';
+export type AIProvider = 'gemini' | 'deepseek' | 'custom-openai';
 export type GeminiModelName = 'gemini-flash-latest' | 'gemini-flash-lite-latest';
 export type DeepSeekModelName = 'deepseek-flash';
 export type AIModelName = GeminiModelName | DeepSeekModelName;
@@ -12,7 +12,9 @@ export const GEMINI_MODEL_OPTIONS: GeminiModelName[] = ['gemini-flash-latest', '
 export const DEEPSEEK_MODEL_OPTIONS: DeepSeekModelName[] = ['deepseek-flash'];
 
 export function normalizeAIProvider(value?: unknown): AIProvider {
-  return value === 'gemini' || value === 'deepseek' ? value : DEFAULT_AI_PROVIDER;
+  return value === 'gemini' || value === 'deepseek' || value === 'custom-openai'
+    ? value
+    : DEFAULT_AI_PROVIDER;
 }
 
 export function normalizeAIModel(
@@ -20,6 +22,11 @@ export function normalizeAIModel(
   value?: unknown
 ): AIModelName {
   const model = typeof value === 'string' ? value.trim() : '';
+
+  // 自定义端点的模型名由用户自由填写，不参与内置模型白名单。
+  if (provider === 'custom-openai') {
+    return (model || DEEPSEEK_MODEL_NAME) as AIModelName;
+  }
 
   if (provider === 'deepseek') {
     return DEEPSEEK_MODEL_OPTIONS.includes(model as DeepSeekModelName)
@@ -45,8 +52,14 @@ export function getModelName(
 export function getImageRecognitionModelName(
   provider: AIProvider = DEFAULT_AI_PROVIDER,
   model?: unknown
-): ImageRecognitionModelName {
-  return provider === 'deepseek'
-    ? DEEPSEEK_VISION_MODEL_NAME
-    : normalizeAIModel(provider, model) as GeminiModelName;
+): ImageRecognitionModelName | string {
+  if (provider === 'deepseek') {
+    return DEEPSEEK_VISION_MODEL_NAME;
+  }
+  // 自定义端点：直接使用用户填写的模型名（是否支持视觉由用户端点决定）。
+  if (provider === 'custom-openai') {
+    const customModel = typeof model === 'string' ? model.trim() : '';
+    return customModel || DEEPSEEK_VISION_MODEL_NAME;
+  }
+  return normalizeAIModel(provider, model) as GeminiModelName;
 }

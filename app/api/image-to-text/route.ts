@@ -2,7 +2,7 @@ import { getImageExtractionPrompt } from '../../lib/languagePrompts';
 import { normalizeLocale } from '../../i18n';
 import { NextRequest, NextResponse } from 'next/server';
 import { proxyOpenAICompatibleRequest } from '../_utils/openaiProxy';
-import { ProviderConfigError, resolveProviderConfig, withProviderControls } from '../_utils/providerConfig';
+import { ProviderConfigError, resolveRequestProviderConfig, withProviderControls } from '../_utils/providerConfig';
 import { requireApiSession } from '../_utils/sessionAuth';
 import { getImageRecognitionModelName } from '../../lib/aiModels';
 
@@ -27,8 +27,8 @@ export async function POST(req: NextRequest) {
       );
     }
     
-    const { imageData, prompt, model, apiUrl, stream = false, provider } = parsedBody;
-    const providerConfig = resolveProviderConfig(req, { provider, apiUrl, model });
+    const { imageData, prompt, model, apiUrl, stream = false, provider, customApiUrl, customApiKey, customModel, customExtraBody } = parsedBody;
+    const providerConfig = resolveRequestProviderConfig(req, { provider, apiUrl, model, customApiUrl, customApiKey, customModel, customExtraBody });
 
     // 验证imageData大小
     if (typeof imageData === 'string' && imageData.length > 1024 * 1024 * 8) { // 8MB限制
@@ -74,7 +74,7 @@ export async function POST(req: NextRequest) {
           ]
         }
       ]
-    }, { enableThinking: false });
+    }, { enableThinking: false, customExtraBody: providerConfig.customExtraBody });
 
     const proxied = await proxyOpenAICompatibleRequest({
       url: providerConfig.apiUrl,

@@ -50,3 +50,6 @@ next-env.d.ts
 
 # IDE
 /.idea/
+# Tauri / static export
+src-tauri/target/
+.api-backup-tmp/
