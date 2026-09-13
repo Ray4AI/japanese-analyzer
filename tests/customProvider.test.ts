@@ -60,3 +60,26 @@ export function runCustomProviderTests() {
 
   console.log('customProvider tests passed');
 }
+
+// —— estimateAnalysisMaxTokens ——
+import { estimateAnalysisMaxTokens } from '../app/lib/upstreamPayload';
+
+export function runEstimateMaxTokensTests() {
+  // 短句：走 4096 下限
+  assert.strictEqual(estimateAnalysisMaxTokens('こんにちは。'), 4096);
+
+  // 长文：按 0.9 token/字 × 22 倍 + 2048 估算
+  const longText = 'あ'.repeat(600);
+  const expected600 = Math.min(65536, Math.max(4096, Math.ceil(600 * 0.9) * 22 + 2048));
+  assert.strictEqual(estimateAnalysisMaxTokens(longText), expected600);
+  // 600 字 ≈ 540 token × 22 + 2048 = 13928，应在 4k~16k 区间
+  assert.ok(expected600 > 8000 && expected600 < 20000, `600字预算异常: ${expected600}`);
+
+  // 极端长文封顶 65536
+  assert.strictEqual(estimateAnalysisMaxTokens('あ'.repeat(100000)), 65536);
+
+  // 估算应单调不减
+  assert.ok(estimateAnalysisMaxTokens('あ'.repeat(500)) >= estimateAnalysisMaxTokens('あ'.repeat(100)));
+
+  console.log('estimateAnalysisMaxTokens tests passed');
+}

@@ -1,7 +1,7 @@
 import { createTranslator, getClientLocale } from '../i18n';
 import { getResponseLanguageInstruction, getTranslationSystemPrompt, getChatSystemPrompt, getImageExtractionPrompt } from '../lib/languagePrompts';
 import { getWordDetailSystemPrompt } from '../lib/wordDetailPrompt';
-import { resolveTextUpstreamUrl, withProviderControls as buildUpstreamPayload } from '../lib/upstreamPayload';
+import { resolveTextUpstreamUrl, withProviderControls as buildUpstreamPayload, estimateAnalysisMaxTokens } from '../lib/upstreamPayload';
 import {
   CUSTOM_TEXT_PROVIDER,
   CUSTOM_TTS_STORAGE_KEYS,
@@ -17,7 +17,7 @@ import {
   type AIModelName,
   type AIProvider,
 } from '../lib/aiModels';
-import { splitJapaneseText, type JapaneseTextChunk } from '../utils/japaneseChunking';
+import { splitJapaneseText, type JapaneseChunkingOptions, type JapaneseTextChunk } from '../utils/japaneseChunking';
 import { normalizeEscapedLineBreaks } from '../utils/markdown';
 import { getLocalRomaji } from '../utils/romaji';
 import { ApiRequestError, InvalidResponseError } from '../utils/requestErrors';
@@ -197,6 +197,8 @@ interface DirectUpstreamRequest {
   enableThinking?: boolean;
   stream?: boolean;
   signal?: AbortSignal;
+  /** 解析场景按输入长度估算的输出预算；用户额外请求体里的 max_tokens 优先 */
+  maxTokens?: number;
 }
 
 /** 读取自定义文本端点配置（浏览器端）。 */
@@ -247,6 +249,7 @@ async function directChatCompletion(
     model: modelName,
     messages,
     stream,
+    ...(options.maxTokens ? { max_tokens: options.maxTokens } : {}),
   }, {
     structuredOutput,
     enableThinking,
@@ -1039,9 +1042,14 @@ async function analyzeSingleSentence(
         enableThinking: provider === 'deepseek' && options.deepseekThinkingEnabled === true,
         stream: false,
         signal: options.signal,
+        maxTokens: estimateAnalysisMaxTokens(sentence),
       });
       await ensureDirectOk(response, '解析');
       const result = await response.json();
+      const finishReason = result?.choices?.[0]?.finish_reason;
+      if (typeof finishReason === 'string' && finishReason && finishReason !== 'stop') {
+        throw new InvalidResponseError(getFinishReasonErrorMessage(finishReason, '解析结果'));
+      }
       const content = result?.choices?.[0]?.message?.content;
       if (typeof content !== 'string') throw new InvalidResponseError('解析结果格式错误，请重试');
       const tokens = parseAnalyzeResponseContent(protectedInput.restoreContent(content));
@@ -1070,6 +1078,12 @@ async function analyzeSingleSentence(
     
     const result = await response.json();
 
+    // 非流式响应同样检查截断，给出明确报错而非模糊的“JSON格式错误”。
+    const finishReason = result?.choices?.[0]?.finish_reason;
+    if (typeof finishReason === 'string' && finishReason && finishReason !== 'stop') {
+      throw new InvalidResponseError(getFinishReasonErrorMessage(finishReason, '解析结果'));
+    }
+
     if (result.choices && result.choices[0] && result.choices[0].message && result.choices[0].message.content) {
       const reasoningContent = result.choices[0].message.reasoning_content;
       if (typeof reasoningContent === 'string' && reasoningContent) {
@@ -1094,6 +1108,21 @@ async function analyzeSingleSentence(
   }
 }
 
+/**
+ * 长文自适应分块：文本越长、单次输出的 tokens 数组越长，截断风险越高。
+ * 超过阈值后按长度缩减块大小，把单次请求的输出预算压回安全区间；
+ * 短文保持原默认分块（target 280 / max 420）不受影响。
+ */
+function resolveAnalyzeChunkingOptions(sentence: string): JapaneseChunkingOptions {
+  const textLength = Array.from(sentence).length;
+  if (textLength <= 300) return {};
+
+  if (textLength <= 600) {
+    return { targetChars: 180, maxChars: 260, minChars: 100 };
+  }
+  return { targetChars: 120, maxChars: 180, minChars: 60 };
+}
+
 // 分析日语文本；长文本按完整句子切块后顺序合并
 export async function analyzeSentence(
   sentence: string,
@@ -1106,7 +1135,7 @@ export async function analyzeSentence(
     throw new Error('缺少句子');
   }
 
-  const chunks = splitJapaneseText(sentence);
+  const chunks = splitJapaneseText(sentence, resolveAnalyzeChunkingOptions(sentence));
   if (chunks.length <= 1) {
     return analyzeSingleSentence(sentence, userApiKey, provider, model, options);
   }
@@ -1180,6 +1209,7 @@ async function streamAnalyzeSingleSentence(
         enableThinking: provider === 'deepseek' && options.deepseekThinkingEnabled === true,
         stream: true,
         signal: options.signal,
+        maxTokens: estimateAnalysisMaxTokens(sentence),
       });
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({}));
@@ -1307,7 +1337,7 @@ export async function streamAnalyzeSentence(
     return;
   }
 
-  const chunks = splitJapaneseText(sentence);
+  const chunks = splitJapaneseText(sentence, resolveAnalyzeChunkingOptions(sentence));
   if (chunks.length <= 1) {
     await streamAnalyzeSingleSentence(
       sentence,

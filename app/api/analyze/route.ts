@@ -1,5 +1,6 @@
 import { getResponseLanguageInstruction } from '../../lib/languagePrompts';
 import { normalizeLocale } from '../../i18n';
+import { estimateAnalysisMaxTokens } from '../../lib/upstreamPayload';
 import { NextRequest, NextResponse } from 'next/server';
 import { proxyOpenAICompatibleRequest } from '../_utils/openaiProxy';
 import { ProviderConfigError, resolveRequestProviderConfig, withProviderControls } from '../_utils/providerConfig';
@@ -43,10 +44,14 @@ export async function POST(req: NextRequest) {
     }
 
     // 构建发送到AI服务的请求
+    // 按输入长度预算 max_tokens，避免长文解析在半截 JSON 处被默认输出上限截断。
+    // 用户额外请求体里的 max_tokens 优先（withProviderControls 的浅合并顺序保证）。
+    const analysisMaxTokens = estimateAnalysisMaxTokens(prompt);
     const payload = withProviderControls(providerConfig.provider, {
       model: providerConfig.model,
       messages: [{ role: "system", content: getResponseLanguageInstruction(locale) }, { role: "user", content: prompt }],
       stream: stream,
+      max_tokens: analysisMaxTokens,
     }, {
       structuredOutput: 'analysisTokens',
       enableThinking: thinkingEnabled === true,

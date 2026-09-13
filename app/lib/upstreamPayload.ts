@@ -88,6 +88,20 @@ export function getStructuredResponseFormat(
   };
 }
 
+/**
+ * 根据输入文本长度估算解析输出所需的 max_tokens 预算。
+ * 每个日文字符约 0.9 token；按原文逐字还原要求，tokens 数组序列化后
+ * 约膨胀 15~25 倍（每个词元对象含 word/pos/furigana 与 JSON 语法开销），
+ * 再加安全余量。仅用于解析场景；用户额外请求体里的 max_tokens 优先级更高。
+ */
+export function estimateAnalysisMaxTokens(inputText: string): number {
+  const inputChars = Array.from(inputText).length;
+  const inputTokens = Math.ceil(inputChars * 0.9);
+  const outputBudget = Math.ceil(inputTokens * 22);
+  // 下限 4096（覆盖短句 + 思考型模型的思维链开销），上限 65536（避免极端长文触上游硬限）。
+  return Math.min(65536, Math.max(4096, outputBudget + 2048));
+}
+
 export function withProviderControls(
   provider: AIProvider,
   payload: Record<string, unknown>,
