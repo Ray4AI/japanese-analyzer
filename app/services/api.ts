@@ -109,24 +109,83 @@ export function isTauriDirectMode(): boolean {
 
 let tauriFetchPromise: Promise<typeof fetch | null> | null = null;
 
-/** 加载 Tauri HTTP 插件的 fetch（绕过 CORS）。非 Tauri 环境返回 null。 */
+/** 加载 Tauri HTTP 插件的 fetch（绕过 CORS）。非 Tauri 环境或加载失败返回 null。 */
 function loadTauriFetch(): Promise<typeof fetch | null> {
   if (!isTauriDirectMode()) return Promise.resolve(null);
   if (!tauriFetchPromise) {
     tauriFetchPromise = import('@tauri-apps/plugin-http')
       .then((mod) => mod.fetch as typeof fetch)
       .catch((error) => {
-        console.warn('Tauri HTTP 插件加载失败，回退浏览器 fetch：', error);
+        console.warn('Tauri HTTP 插件加载失败，将使用 proxy_fetch 通道：', error);
         return null;
       });
   }
   return tauriFetchPromise;
 }
 
-/** 直连模式下优先使用 Tauri HTTP 插件发起请求（绕过 CORS）。 */
+let tauriCorePromise: Promise<typeof import('@tauri-apps/api/core') | null> | null = null;
+
+function loadTauriCore(): Promise<typeof import('@tauri-apps/api/core') | null> {
+  if (!isTauriDirectMode()) return Promise.resolve(null);
+  if (!tauriCorePromise) {
+    tauriCorePromise = import('@tauri-apps/api/core').catch(() => null);
+  }
+  return tauriCorePromise;
+}
+
+interface ProxyFetchResponse {
+  status: number;
+  headers: Record<string, string>;
+  body_base64: string;
+}
+
+function toError(value: unknown, fallback: string): Error {
+  if (value instanceof Error && value.message) return value;
+  if (typeof value === 'string' && value.trim()) return new Error(value);
+  if (value && typeof value === 'object') {
+    const message = (value as { message?: unknown }).message;
+    if (typeof message === 'string' && message.trim()) return new Error(message);
+  }
+  return new Error(fallback);
+}
+
+/**
+ * 直连模式请求通道：
+ * 1. 优先 Tauri HTTP 插件 fetch（流式响应支持最好）
+ * 2. 插件被 ACL scope 拒绝或不可用时，回退到 Rust 侧 proxy_fetch 命令（无 scope 限制）
+ * 3. 非 Tauri 环境回退浏览器 fetch
+ */
 async function directFetch(url: string, init: RequestInit): Promise<Response> {
   const tauriFetch = await loadTauriFetch();
-  if (tauriFetch) return tauriFetch(url, init);
+  if (tauriFetch) {
+    try {
+      return await tauriFetch(url, init);
+    } catch (error) {
+      console.warn('Tauri HTTP 插件请求失败，回退 proxy_fetch：', error);
+    }
+  }
+
+  const core = await loadTauriCore();
+  if (core) {
+    const headerRecord: Record<string, string> = {};
+    new Headers(init.headers).forEach((value, key) => { headerRecord[key] = value; });
+    const body = typeof init.body === 'string' ? init.body : init.body ? String(init.body) : null;
+    const response = await core.invoke<ProxyFetchResponse>('proxy_fetch', {
+      request: {
+        url,
+        method: init.method || 'GET',
+        headers: headerRecord,
+        body,
+      },
+    }).catch((error) => { throw toError(error, '上游接口请求失败'); });
+
+    const bytes = Uint8Array.from(atob(response.body_base64), (c) => c.charCodeAt(0));
+    return new Response(bytes, {
+      status: response.status,
+      headers: response.headers,
+    });
+  }
+
   return fetch(url, init);
 }
 

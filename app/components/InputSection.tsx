@@ -19,6 +19,7 @@ import {
 } from '../lib/customProvider';
 import { Icon } from './Icons';
 import CustomTtsSettings from './CustomTtsSettings';
+import { isTauriDirectMode } from '../services/api';
 import { TextShimmer } from '@/components/ui/text-shimmer';
 import { StateMorphButton, StateMorphButtonState } from '@/components/ui/state-morph-button';
 import { normalizePastedText } from '../utils/pastedText';
@@ -88,6 +89,7 @@ export default function InputSection({
   const [isLoading, setIsLoading] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [ttsAudioUrl, setTtsAudioUrl] = useState<string | null>(null);
+  const [ttsError, setTtsError] = useState('');
   const [isImageUploading, setIsImageUploading] = useState(false);
   const [uploadStatus, setUploadStatus] = useState('');
   const [uploadStatusClass, setUploadStatusClass] = useState('');
@@ -264,6 +266,7 @@ export default function InputSection({
   const handleSpeak = async () => {
     if (!inputText.trim()) return;
     setIsSpeaking(true);
+    setTtsError('');
 
     try {
       if (ttsProvider === 'edge') {
@@ -293,8 +296,12 @@ export default function InputSection({
     } catch (e) {
       console.error('TTS error:', e);
       setTtsAudioUrl(null);
-      // 如果失败，回退到系统 TTS
-      speakJapanese(inputText);
+      const message = e instanceof Error && e.message ? e.message : t("语音合成失败，请稍后重试");
+      // 显示具体错误。桌面端 WebView 常缺日语系统语音，回退也无声，仅 Web 端保留兑底。
+      if (!isTauriDirectMode()) {
+        speakJapanese(inputText);
+      }
+      setTtsError(message);
     } finally {
       setIsSpeaking(false);
     }
@@ -819,6 +826,15 @@ export default function InputSection({
       </section>
 
       {uploadStatus && <div id="imageUploadStatus" className={uploadStatusClass}>{errorText(uploadStatus)}</div>}
+
+      {ttsError && (
+        <div
+          className="mt-4 rounded-xl p-4 text-sm"
+          style={{ background: 'color-mix(in oklab, var(--pos-p) 10%, transparent)', color: 'var(--ink-2)' }}
+        >
+          <p className="m-0">{t("朗读失败：")}{errorText(ttsError)}</p>
+        </div>
+      )}
 
       {ttsAudioUrl && (
         <div className="mt-4">

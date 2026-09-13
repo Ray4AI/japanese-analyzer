@@ -1,1 +1,1 @@
-{"default":{"identifier":"default","description":"默认窗口能力（含 HTTP 直连权限，用于绕过 CORS 访问自定义 OpenAI 兼容端点）","local":true,"windows":["main"],"permissions":["core:default","http:default"]}}
+{"default":{"identifier":"default","description":"默认窗口能力（HTTP 插件放行任意 https/http 端点，用于自定义 OpenAI 兼容接口直连）","local":true,"windows":["main"],"permissions":["core:default",{"identifier":"http:default","allow":[{"url":"https://**"},{"url":"https://**:*"},{"url":"http://**"},{"url":"http://**:*"}]}]}}

@@ -244,5 +244,7 @@ export const messages = {
   "自定义语音接口请求失败（HTTP {0}）": {"zh-TW": "自訂語音介面請求失敗（HTTP {0}）", "en": "Custom TTS request failed (HTTP {0})", "ko": "사용자 지정 음성 요청 실패 (HTTP {0})"},
   "语音额外请求体不是有效的 JSON 对象": {"zh-TW": "語音額外請求體不是有效的 JSON 物件", "en": "TTS extra body is not a valid JSON object", "ko": "음성 추가 본문이 유효한 JSON 개체가 아닙니다"},
   "自定义语音接口返回空音频": {"zh-TW": "自訂語音介面傳回空音訊", "en": "Custom TTS returned empty audio", "ko": "사용자 지정 음성이 빈 오디오를 반환했습니다"},
+  "语音合成失败，请稍后重试": {"zh-TW": "語音合成失敗，請稍後重試", "en": "Speech synthesis failed. Please try again later.", "ko": "음성 합성에 실패했습니다. 잠시 후 다시 시도해 주세요."},
+  "朗读失败：": {"zh-TW": "朗讀失敗：", "en": "Read aloud failed: ", "ko": "읽기 실폐: "},
   "第 {0}/{1} 段": {"zh-TW": "第 {0}/{1} 段", "en": "Chunk {0}/{1}", "ko": "{0}/{1}번째 구간"},
 } as const;
