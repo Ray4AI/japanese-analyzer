@@ -93,6 +93,47 @@ export interface ReasoningSummaryRequestOptions {
   signal?: AbortSignal;
 }
 
+const ANALYZE_MAX_ATTEMPTS = 3;
+const ANALYZE_RETRY_BASE_DELAY_MS = 400;
+
+/** 配置类/鉴权类错误重试无意义，直接报错。 */
+function isNonRetryableRequestError(error: unknown): boolean {
+  if (error instanceof ApiRequestError) {
+    return error.status === 400 || error.status === 401 || error.status === 403 || error.status === 404;
+  }
+  return false;
+}
+
+/**
+ * 解析/翻译请求的自动重试：最多 3 次尝试（含首次），指数退避。
+ * 中断（abort）不重试；配置/鉴权类错误不重试。
+ */
+async function runWithRetry<T>(
+  task: (attempt: number) => Promise<T>,
+  signal?: AbortSignal
+): Promise<T> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= ANALYZE_MAX_ATTEMPTS; attempt += 1) {
+    if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+    try {
+      return await task(attempt);
+    } catch (error) {
+      if (signal?.aborted || isAbortError(error)) throw error;
+      if (isNonRetryableRequestError(error)) throw error;
+      lastError = error;
+      if (attempt < ANALYZE_MAX_ATTEMPTS) {
+        await new Promise((resolve) => setTimeout(resolve, ANALYZE_RETRY_BASE_DELAY_MS * attempt));
+      }
+    }
+  }
+  throw lastError;
+}
+
+/** 翻译输出质量兜底：目标语言为非日语时，输出中出现假名即视为未翻译。 */
+function translationLooksUntranslated(text: string): boolean {
+  return /[\u3041-\u3096\u30A1-\u30FA\u30FC]/.test(text);
+}
+
 function isAbortError(error: unknown): boolean {
   return error instanceof Error && error.name === 'AbortError';
 }
@@ -1137,7 +1178,7 @@ export async function analyzeSentence(
 
   const chunks = splitJapaneseText(sentence, resolveAnalyzeChunkingOptions(sentence));
   if (chunks.length <= 1) {
-    return analyzeSingleSentence(sentence, userApiKey, provider, model, options);
+    return runWithRetry(() => analyzeSingleSentence(sentence, userApiKey, provider, model, options), options.signal);
   }
 
   const mergedTokens: TokenData[] = [];
@@ -1145,24 +1186,38 @@ export async function analyzeSentence(
 
   for (let index = 0; index < chunks.length; index += 1) {
     const chunk = chunks[index];
-    const chunkTokens = await analyzeSingleSentence(
-      chunk.text,
-      userApiKey,
-      provider,
-      model,
-      {
-        ...options,
-        onReasoning: options.onReasoning
-          ? (text) => {
-              reasoningByChunk[index] = text;
-              options.onReasoning?.(
-                formatChunkReasoning(reasoningByChunk, index),
-                false
-              );
-            }
-          : undefined,
-      }
-    );
+    let chunkTokens: TokenData[];
+    try {
+      chunkTokens = await runWithRetry(
+        () => analyzeSingleSentence(
+          chunk.text,
+          userApiKey,
+          provider,
+          model,
+          {
+            ...options,
+            onReasoning: options.onReasoning
+              ? (text) => {
+                  reasoningByChunk[index] = text;
+                  options.onReasoning?.(
+                    formatChunkReasoning(reasoningByChunk, index),
+                    false
+                  );
+                }
+              : undefined,
+          }
+        ),
+        options.signal
+      );
+    } catch (error) {
+      // 重试耗尽：以原文占位，不中断整体解析
+      if (options.signal?.aborted || isAbortError(error)) throw error;
+      console.warn(
+        `第 ${index + 1}/${chunks.length} 段解析失败（已重试），以原文占位：`,
+        error instanceof Error ? error.message : error
+      );
+      chunkTokens = makeFailedChunkPlaceholder(chunk);
+    }
     const reconciledTokens = reconcileChunkReconstruction(
       chunk,
       chunkTokens,
@@ -1297,22 +1352,29 @@ async function streamAnalyzeChunk(
   let finalTokens: TokenData[] | null = null;
   let streamError: Error | null = null;
 
-  await streamAnalyzeSingleSentence(
-    chunk.text,
-    (content, isDone) => {
-      if (isDone) finalTokens = parseAnalyzeResponseContent(content);
-    },
-    (error) => {
-      streamError = error;
-    },
-    userApiKey,
-    provider,
-    model,
-    {
-      ...options,
-      onReasoning,
-    }
-  );
+  // 单块解析失败（JSON 不完整/原文还原不一致/网络抖动等）自动重试，最多 3 次。
+  // 块内部分内容不会上屏，重试是干净的。
+  await runWithRetry(async () => {
+    streamError = null;
+    finalTokens = null;
+    await streamAnalyzeSingleSentence(
+      chunk.text,
+      (content, isDone) => {
+        if (isDone) finalTokens = parseAnalyzeResponseContent(content);
+      },
+      (error) => {
+        streamError = error;
+      },
+      userApiKey,
+      provider,
+      model,
+      {
+        ...options,
+        onReasoning,
+      }
+    );
+    if (streamError) throw streamError;
+  }, options.signal);
 
   if (streamError) throw streamError;
   if (!finalTokens) {
@@ -1320,6 +1382,27 @@ async function streamAnalyzeChunk(
   }
 
   return reconcileChunkReconstruction(chunk, finalTokens, chunkIndex, chunkCount);
+}
+
+/**
+ * 解析失败的块：以原文占位（保证全文拼接不变），词性标记为“解析失敗”便于识别。
+ * 占位保证后续块的位置索引依然正确，且用户可见原文、可手动关注。
+ */
+function makeFailedChunkPlaceholder(chunk: JapaneseTextChunk): TokenData[] {
+  const placeholder: TokenData[] = [];
+  const lines = chunk.text.split('\n');
+  lines.forEach((line, lineIndex) => {
+    if (line) {
+      placeholder.push({ word: line, pos: '解析失敗', furigana: '', romaji: '' });
+    }
+    if (lineIndex < lines.length - 1) {
+      placeholder.push({ word: '\n', pos: '改行', furigana: '', romaji: '' });
+    }
+  });
+  if (placeholder.length === 0) {
+    placeholder.push({ word: chunk.text, pos: '解析失敗', furigana: '', romaji: '' });
+  }
+  return placeholder;
 }
 
 // 流式分析日语文本；长文本保持完整句界，最多并行处理三个语义块
@@ -1339,15 +1422,38 @@ export async function streamAnalyzeSentence(
 
   const chunks = splitJapaneseText(sentence, resolveAnalyzeChunkingOptions(sentence));
   if (chunks.length <= 1) {
+    // 单块流式解析：失败后自动降级为非流式重试（最多 3 次）。
+    // 非流式成功后通过 done 协议交付完整结果，覆盖此前可能已上屏的部分内容。
+    const streamState: { error: Error | null } = { error: null };
     await streamAnalyzeSingleSentence(
       sentence,
       onChunk,
-      onError,
+      (error) => {
+        streamState.error = error instanceof Error ? error : new Error(String(error));
+      },
       userApiKey,
       provider,
       model,
       options
     );
+
+    const failure: Error | null = streamState.error;
+    if (!failure || options.signal?.aborted || isAbortError(failure)) {
+      if (failure) onError(failure);
+      return;
+    }
+
+    console.warn('流式解析失败，自动降级为非流式重试：', failure.message);
+    try {
+      const tokens = await runWithRetry(
+        () => analyzeSingleSentence(sentence, userApiKey, provider, model, options),
+        options.signal
+      );
+      onChunk(JSON.stringify({ tokens }), true);
+    } catch (retryError) {
+      // 非流式重试的报错（含 finish_reason 截断检测）通常更有诊断价值
+      onError(retryError instanceof Error ? retryError : failure);
+    }
     return;
   }
 
@@ -1361,10 +1467,9 @@ export async function streamAnalyzeSentence(
   let emittedChunkCount = 0;
   let emittedReasoningText = '';
   let emittedReasoningDone = false;
-  let failed = false;
 
   const emitReasoning = () => {
-    if (failed || !options.onReasoning) return;
+    if (!options.onReasoning) return;
 
     let includeThroughIndex = 0;
     while (
@@ -1384,8 +1489,6 @@ export async function streamAnalyzeSentence(
   };
 
   const emitCompletedTokens = () => {
-    if (failed) return;
-
     let contiguousChunkCount = 0;
     while (tokensByChunk[contiguousChunkCount]) contiguousChunkCount += 1;
     if (contiguousChunkCount === emittedChunkCount) return;
@@ -1400,15 +1503,8 @@ export async function streamAnalyzeSentence(
     );
   };
 
-  const reportError = (error: unknown) => {
-    if (failed || options.signal?.aborted) return;
-    failed = true;
-    groupController.abort();
-    onError(error instanceof Error ? error : new Error('未知错误'));
-  };
-
   const worker = async () => {
-    while (!failed && !requestOptions.signal.aborted) {
+    while (!requestOptions.signal.aborted) {
       const chunkIndex = nextChunkIndex;
       if (chunkIndex >= chunks.length) return;
       nextChunkIndex += 1;
@@ -1420,7 +1516,7 @@ export async function streamAnalyzeSentence(
           chunks.length,
           options.onReasoning
             ? (text, done) => {
-                if (failed || requestOptions.signal.aborted) return;
+                if (requestOptions.signal.aborted) return;
                 reasoningByChunk[chunkIndex] = text;
                 reasoningDoneByChunk[chunkIndex] = done;
                 emitReasoning();
@@ -1431,14 +1527,21 @@ export async function streamAnalyzeSentence(
           model,
           requestOptions
         );
-        if (failed) return;
         tokensByChunk[chunkIndex] = tokens;
         reasoningDoneByChunk[chunkIndex] = true;
         emitCompletedTokens();
         emitReasoning();
       } catch (error) {
-        reportError(error);
-        return;
+        // 重试耗尽：以原文占位保留该块位置，不中断整体解析（其余块继续展示）
+        if (requestOptions.signal.aborted) return;
+        console.warn(
+          `第 ${chunkIndex + 1}/${chunks.length} 段解析失败（已重试），以原文占位：`,
+          error instanceof Error ? error.message : error
+        );
+        tokensByChunk[chunkIndex] = makeFailedChunkPlaceholder(chunks[chunkIndex]);
+        reasoningDoneByChunk[chunkIndex] = true;
+        emitCompletedTokens();
+        emitReasoning();
       }
     }
   };
@@ -1461,56 +1564,73 @@ export async function streamTranslateText(
   model?: string | null,
   signal?: AbortSignal
 ): Promise<void> {
-  try {
-    // Tauri 直连模式
-    if (isTauriDirectMode()) {
-      const response = await directChatCompletion([
-        { role: 'system', content: getTranslationSystemPrompt(getClientLocale()) },
-        { role: 'user', content: japaneseText },
-      ], { provider, model, stream: true, signal });
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        onError(new Error(`流式翻译失败：${errorData.error?.message || response.statusText || '未知错误'}`));
-        return;
+  const maxAttempts = 3;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    if (signal?.aborted) return;
+    let fullContent = '';
+    let attemptError: Error | null = null;
+    let response: Response;
+
+    try {
+      // Tauri 直连模式
+      if (isTauriDirectMode()) {
+        response = await directChatCompletion([
+          { role: 'system', content: getTranslationSystemPrompt(getClientLocale()) },
+          { role: 'user', content: japaneseText },
+        ], { provider, model, stream: true, signal });
+        if (!response.ok) {
+          const errorData = await response.json().catch(() => ({}));
+          onError(new Error(`流式翻译失败：${errorData.error?.message || response.statusText || '未知错误'}`));
+          return;
+        }
+      } else {
+        const apiUrl = getApiEndpoint('/translate');
+        const headers = getHeaders(userApiKey);
+
+        response = await fetch(apiUrl, {
+          method: 'POST',
+          headers,
+          signal,
+          body: JSON.stringify({
+            text: japaneseText,
+            ...getRequestProviderPayload(provider, model),
+            stream: true
+          })
+        });
+
+        if (!response.ok) {
+          const errorData = await response.json().catch(() => ({}));
+          onError(new Error(`流式翻译失败：${errorData.error?.message || response.statusText || '未知错误'}`));
+          return;
+        }
       }
-      await readOpenAIContentStream(response, onChunk, onError, {
+
+      await readOpenAIContentStream(response, (chunk, done) => {
+        fullContent = chunk;
+        onChunk(chunk, done);
+      }, (error) => {
+        attemptError = error;
+      }, {
         signal,
         debounceMs: 60,
         parseWarning: 'Failed to parse streaming JSON chunk:',
       });
+    } catch (error) {
+      if (signal?.aborted || isAbortError(error)) return;
+      console.error('Error in stream translating text:', error);
+      onError(toError(error, '流式翻译失败'));
       return;
     }
 
-    const apiUrl = getApiEndpoint('/translate');
-    const headers = getHeaders(userApiKey);
-    
-    const response = await fetch(apiUrl, {
-      method: 'POST',
-      headers,
-      signal,
-      body: JSON.stringify({ 
-        text: japaneseText,
-        ...getRequestProviderPayload(provider, model),
-        stream: true
-      })
-    });
-
-    if (!response.ok) {
-      const errorData = await response.json();
-      console.error('API Error (Stream Translation):', errorData);
-      onError(new Error(`流式翻译失败：${errorData.error?.message || response.statusText || '未知错误'}`));
+    if (attemptError) {
+      if (signal?.aborted || isAbortError(attemptError)) return;
+      onError(attemptError);
       return;
     }
-    
-    await readOpenAIContentStream(response, onChunk, onError, {
-      signal,
-      debounceMs: 60,
-      parseWarning: 'Failed to parse streaming JSON chunk:',
-    });
-  } catch (error) {
-    if (signal?.aborted || isAbortError(error)) return;
-    console.error('Error in stream translating text:', error);
-    onError(error instanceof Error ? error : new Error('未知错误'));
+
+    // 质量兑底：输出中仍含假名 = 未翻译，自动重试（重新流式输出会覆盖旧内容）。
+    if (!translationLooksUntranslated(fullContent)) return;
+    if (attempt === maxAttempts) return;
   }
 }
 
@@ -1666,7 +1786,7 @@ export async function translateText(
   model?: string | null,
   signal?: AbortSignal
 ): Promise<string> {
-  try {
+  return runWithRetry(async () => {
     // Tauri 直连模式
     if (isTauriDirectMode()) {
       const response = await directChatCompletion([
@@ -1677,7 +1797,11 @@ export async function translateText(
       const result = await response.json();
       const content = result?.choices?.[0]?.message?.content;
       if (typeof content !== 'string') throw new Error('翻译结果格式错误');
-      return content.trim();
+      const trimmed = content.trim();
+      if (translationLooksUntranslated(trimmed)) {
+        throw new InvalidResponseError('翻译输出仍是日文原文');
+      }
+      return trimmed;
     }
 
     const apiUrl = getApiEndpoint('/translate');
@@ -1694,7 +1818,7 @@ export async function translateText(
     });
 
     if (!response.ok) {
-      const errorData = await response.json();
+      const errorData = await response.json().catch(() => ({}));
       console.error('API Error (Translation):', errorData);
       throw new Error(`翻译失败：${errorData.error?.message || response.statusText || '未知错误'}`);
     }
@@ -1702,15 +1826,16 @@ export async function translateText(
     const result = await response.json();
     
     if (result.choices && result.choices[0] && result.choices[0].message && result.choices[0].message.content) {
-      return result.choices[0].message.content.trim();
+      const trimmed = result.choices[0].message.content.trim();
+      if (translationLooksUntranslated(trimmed)) {
+        throw new InvalidResponseError('翻译输出仍是日文原文');
+      }
+      return trimmed;
     } else {
       console.error('Unexpected API response structure (Translation):', result);
       throw new Error('翻译结果格式错误');
     }
-  } catch (error) {
-    console.error('Error translating text:', error);
-    throw error;
-  }
+  }, signal);
 }
 
 // 从图片提取文本
