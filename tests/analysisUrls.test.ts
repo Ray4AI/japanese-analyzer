@@ -20,8 +20,9 @@ export async function runAnalysisUrlTests() {
       const tokens = words.filter(word => !omitLink || !/JAURL\d+END/u.test(word))
         .map(word => ({ word, pos: '記号', furigana: '' }));
       const content = JSON.stringify({ tokens });
-      if (!body.stream) return Response.json({ choices: [{ message: { content } }] });
+      // malformed 对流式/非流式同样生效：坏内容不应因降级重试而被“偶然修复”
       const output = malformed ? content.slice(0, -2) : content;
+      if (!body.stream) return Response.json({ choices: [{ message: { content: output } }] });
       const events = [...output].map(char => `data: ${JSON.stringify({ choices: [{ delta: { content: char } }] })}\n\n`).join('');
       return new Response(events + 'data: [DONE]\n\n');
     };
