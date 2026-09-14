@@ -27,6 +27,7 @@ import {
   AIProvider,
   TTSProvider,
   getModelName,
+  isTauriDirectMode,
   loadAISettingsFromStorage,
   parseAnalyzeResponseContent,
   summarizeDeepSeekReasoningProgress,
@@ -133,6 +134,12 @@ export default function Home() {
 
   // 检查是否需要密码验证
   useEffect(() => {
+    // Tauri 桌面静态版没有 /api/auth 路由，本地应用无需访问认证
+    if (isTauriDirectMode()) {
+      setRequiresAuth(false);
+      setIsAuthenticated(true);
+      return;
+    }
     const checkAuthRequirement = async () => {
       try {
         const response = await fetch('/api/auth');

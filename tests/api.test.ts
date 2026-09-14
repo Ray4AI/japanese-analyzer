@@ -23,7 +23,9 @@ import {
   parseAnalyzeResponseContent,
   parseWordDetailResponseContent,
   readOpenAIContentStream,
-  type StorageLike
+  repairTokenReconstruction,
+  type StorageLike,
+  type TokenData
 } from '../app/services/api';
 import {
   DEFAULT_AI_PROVIDER as SERVER_DEFAULT_AI_PROVIDER,
@@ -509,6 +511,26 @@ assert.strictEqual(parseAnalyzeResponseContent('```json' + cleanTokens + '```').
 assert.strictEqual(parseAnalyzeResponseContent(cleanTokens).length, 1);
 assert.throws(() => parseAnalyzeResponseContent('完全没有 JSON 的回复'));
 assert.throws(() => parseAnalyzeResponseContent('{"foo":1}'), /tokens/);
+
+// 字符级修补：模型多字/漏字后 tokens 拼接能被缝回原文
+const mkToken = (word: string): TokenData => ({ word, pos: '名詞', furigana: '', romaji: '' });
+const driftedTokens = ['僕', 'は', 'それ', '以上', 'も', '何', 'も', '言え', 'なっ', 'た', '。'].map(mkToken);
+const driftedSource = '僕はそれ以上何も言えなかった。';
+const repairedDrift = repairTokenReconstruction(driftedSource, driftedTokens);
+assert.ok(repairedDrift, '少量偏差应可修补');
+assert.strictEqual(repairedDrift.map(t => t.word).join(''), driftedSource);
+assert.strictEqual(repairedDrift.length, driftedTokens.length);
+
+// 空白差异（原文含换行/空格）也应可修补
+const wsTokens = ['僕', 'は', 'それ', '以上', '何', 'も', '言え', 'なっ', 'た', '。'].map(mkToken);
+const wsSource = '僕は それ以上\n何も言えなかった。';
+const repairedWs = repairTokenReconstruction(wsSource, wsTokens);
+assert.ok(repairedWs, '空白差异应可修补');
+assert.strictEqual(repairedWs.map(t => t.word).join(''), wsSource);
+
+// 差异过大（超过阈值）应拒绝修补
+assert.strictEqual(repairTokenReconstruction('あいうえおかきくけこさしすせそ', ['xyz'].map(mkToken)), null);
+assert.strictEqual(repairTokenReconstruction(driftedSource, []), null);
 
 function streamData(payload: unknown): string {
   return `data: ${JSON.stringify(payload)}\n\n`;

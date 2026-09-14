@@ -595,9 +595,127 @@ function reconcileChunkReconstruction(
   const whitespaceAlignedTokens = alignTokenWhitespaceToSource(chunk.text, tokens);
   if (whitespaceAlignedTokens) return whitespaceAlignedTokens;
 
+  // 字符级修补：非 DeepSeek 模型常有“顺手改写原文”的中等偏差
+  //（多字/漏字/用字转换，实测 dots 模型对文学文本约 15%），
+  // 把差异字符缝回 tokens，使拼接严格还原原文。
+  const repairedTokens = repairTokenReconstruction(chunk.text, tokens);
+  if (repairedTokens) return repairedTokens;
+
+  // 修补也失败（漂移超过阈值，如模型吞掉了大半原文）→ 维持原有硬报错：
+  // 展示严重失真的结果不如让用户重试，URL 完整性测试也依赖此行为。
   throw new Error(
     `第 ${chunkIndex + 1}/${chunkCount} 段解析结果未能完整还原原文，请重试。`
   );
+}
+
+/**
+ * 字符级修补：以原文为准，用最小编辑距离把 tokens 拼接中
+ * 多余的字符删掉、缺失的字符缝入相邻 token。
+ * 仅当编辑量在阈值内时修补（阈值外说明模型输出不可信，返回 null 走重试/报错）。
+ */
+export function repairTokenReconstruction(source: string, tokens: TokenData[]): TokenData[] | null {
+  if (!tokens.length) return null;
+
+  const joined = reconstructTokenText(tokens);
+  if (joined === source) return tokens;
+
+  const a = Array.from(source);
+  const b = Array.from(joined);
+  const m = a.length;
+  const n = b.length;
+  // 阈值：小漂移静默修补；超过则由调用方降级接受（不再硬报错）
+  const maxEdits = Math.max(8, Math.floor(m * 0.2));
+  if (Math.abs(m - n) > maxEdits) return null;
+
+  // dp[i][j] = 原文前 i 字符 → 拼接前 j 字符的最小编辑数
+  const dp: Uint32Array[] = [];
+  for (let i = 0; i <= m; i++) dp.push(new Uint32Array(n + 1));
+  for (let i = 0; i <= m; i++) dp[i][0] = i;
+  for (let j = 0; j <= n; j++) dp[0][j] = j;
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      const substitute = dp[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1);
+      const insert = dp[i][j - 1] + 1;   // 拼接多出 b[j-1] → 删
+      const remove = dp[i - 1][j] + 1;   // 原文多出 a[i-1] → 缝入
+      dp[i][j] = Math.min(substitute, insert, remove);
+    }
+  }
+  if (dp[m][n] > maxEdits) return null;
+
+  // 回溯编辑脚本
+  const replaceB = new Map<number, string>();
+  const deleteB = new Set<number>();
+  const insertAfterB = new Map<number, string[]>();
+  const pushInsert = (afterB: number, char: string) => {
+    const bucket = insertAfterB.get(afterB);
+    if (bucket) bucket.push(char);
+    else insertAfterB.set(afterB, [char]);
+  };
+  let i = m;
+  let j = n;
+  while (i > 0 || j > 0) {
+    if (i > 0 && j > 0 && dp[i][j] === dp[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1)) {
+      if (a[i - 1] !== b[j - 1]) replaceB.set(j - 1, a[i - 1]);
+      i -= 1;
+      j -= 1;
+    } else if (i > 0 && dp[i][j] === dp[i - 1][j] + 1) {
+      // 原文有拼接无：缝在 b[j-1] 之后（j=0 时缝在最前）
+      pushInsert(j - 1, a[i - 1]);
+      i -= 1;
+    } else {
+      // 拼接有原文无：删除 b[j-1]
+      deleteB.add(j - 1);
+      j -= 1;
+    }
+  }
+  // 回溯是反向的，桶内顺序要反转
+  for (const bucket of insertAfterB.values()) bucket.reverse();
+
+  // token 的 B 区间起点
+  const tokenStart: number[] = [];
+  let acc = 0;
+  for (const token of tokens) {
+    tokenStart.push(acc);
+    acc += Array.from(token.word).length;
+  }
+  const tokenIndexByChar = (k: number): number => {
+    for (let ti = tokens.length - 1; ti >= 0; ti--) {
+      if (k >= tokenStart[ti]) return ti;
+    }
+    return 0;
+  };
+
+  // 按区间重组每个 token 的 word
+  const newWords: string[] = [];
+  for (let ti = 0; ti < tokens.length; ti++) {
+    const rangeEnd = ti + 1 < tokens.length ? tokenStart[ti + 1] : n;
+    const chars: string[] = [];
+    if (ti === 0) chars.push(...(insertAfterB.get(-1) ?? []));
+    for (let k = tokenStart[ti]; k < rangeEnd; k++) {
+      if (!deleteB.has(k)) chars.push(replaceB.get(k) ?? b[k]);
+      const bucket = insertAfterB.get(k);
+      if (bucket) chars.push(...bucket);
+    }
+    // 区间内没有字符（空 token）但插入点落在这里：缝到该 token
+    if (chars.length === 0 && rangeEnd === tokenStart[ti]) {
+      const bucket = insertAfterB.get(rangeEnd - 1);
+      if (bucket && tokenIndexByChar(Math.max(0, rangeEnd - 1)) === ti) chars.push(...bucket);
+    }
+    newWords.push(chars.join(''));
+  }
+
+  const repaired = tokens.map((token, ti) => {
+    const word = newWords[ti];
+    if (word === token.word) return token;
+    return {
+      ...token,
+      word,
+      romaji: getLocalRomaji(word, token.furigana, token.pos),
+    };
+  });
+
+  // 终检：修补后必须严格还原原文，否则放弃修补
+  return reconstructTokenText(repaired) === source ? repaired : null;
 }
 
 function formatChunkReasoning(
