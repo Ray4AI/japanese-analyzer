@@ -242,7 +242,7 @@ export default function SettingsModal({
                   id="customExtraBodyInput"
                   className="nd-input font-mono text-xs"
                   rows={4}
-                  placeholder={'{ "temperature": 0.3, "max_tokens": 4096 }'}
+                  placeholder={'{ "provider": { "require_parameters": true }, "max_tokens": 8192 }'}
                   value={customExtra}
                   onChange={(e) => handleCustomExtraChange(e.target.value)}
                 />

@@ -16,6 +16,8 @@ jobs:
   build-windows:
     name: Tauri Windows (NSIS + portable)
     runs-on: windows-latest
+    permissions:
+      contents: write
 
     steps:
       - name: Check out repository

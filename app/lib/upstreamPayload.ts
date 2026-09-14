@@ -70,10 +70,16 @@ export function getStructuredResponseFormat(
   provider: AIProvider,
   kind: StructuredOutputKind
 ): Record<string, unknown> {
-  if (provider === 'deepseek' || provider === CUSTOM_TEXT_PROVIDER) {
+  // DeepSeek 官方对 json_object 做了语法级强约束（稳定兑现），沿用原项目方案。
+  if (provider === 'deepseek') {
     return { type: 'json_object' };
   }
 
+  // 自定义端点与 Gemini 一律使用 json_schema strict：
+  // OpenRouter 等聚合平台上 json_object 是否被兑现取决于实际路由到的端点
+  // （部分只当提示词暗示，部分直接忽略导致输出非 JSON），
+  // 而声明支持 structured outputs 的模型在 json_schema + strict 下才是真正的强约束。
+  // 用户仍可通过“额外请求体”覆盖 response_format（浅合并时用户字段优先）。
   const structuredOutput = structuredOutputSchemas[kind];
   return {
     type: 'json_schema',

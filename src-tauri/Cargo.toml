@@ -1,6 +1,6 @@
 [package]
 name = "japanese-analyzer"
-version = "0.1.0"
+version = "0.1.1"
 description = "日本語文章解析 - Tauri Windows 封装"
 edition = "2021"
 

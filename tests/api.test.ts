@@ -443,6 +443,17 @@ assert.deepStrictEqual(getStructuredResponseFormat('deepseek', 'analysisTokens')
   type: 'json_object',
 });
 
+// 自定义端点走 json_schema strict（OpenRouter 等平台上 json_object 不可靠）
+const customAnalysisResponseFormat = getStructuredResponseFormat('custom-openai', 'analysisTokens');
+assert.strictEqual(customAnalysisResponseFormat.type, 'json_schema');
+assert.ok(
+  JSON.stringify(customAnalysisResponseFormat).includes('"tokens"')
+);
+assert.strictEqual(
+  (getStructuredResponseFormat('custom-openai', 'wordDetail') as Record<string, unknown>).type,
+  'json_schema'
+);
+
 const geminiAnalysisResponseFormat = getStructuredResponseFormat('gemini', 'analysisTokens');
 assert.strictEqual(geminiAnalysisResponseFormat.type, 'json_schema');
 assert.ok(
@@ -469,6 +480,24 @@ assert.deepStrictEqual(
   (geminiStructuredPayload.response_format as Record<string, unknown>).type,
   'json_schema'
 );
+
+// 自定义端点：默认 json_schema，且“额外请求体”里的 response_format 优先级更高
+const customStructuredPayload = withProviderControls(
+  'custom-openai',
+  { model: 'my-model' },
+  { structuredOutput: 'analysisTokens' }
+);
+assert.strictEqual(
+  (customStructuredPayload.response_format as Record<string, unknown>).type,
+  'json_schema'
+);
+
+const customOverridePayload = withProviderControls(
+  'custom-openai',
+  { model: 'my-model' },
+  { structuredOutput: 'analysisTokens', customExtraBody: '{"response_format":{"type":"json_object"}}' }
+);
+assert.deepStrictEqual(customOverridePayload.response_format, { type: 'json_object' });
 
 function streamData(payload: unknown): string {
   return `data: ${JSON.stringify(payload)}\n\n`;

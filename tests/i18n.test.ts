@@ -60,7 +60,17 @@ async function main() {
                 assert.match(prompt, locale === 'ko' ? /번역하거나 이미지 내용을 분석하지 마세요/ : locale === 'en' ? /Do not translate/ : locale === 'zh-TW' ? /不要翻譯/ : /不要翻译/);
               } else {
                 assert.equal(payload.messages[0].role, 'system');
-                assert.ok(payload.messages[0].content.includes(getResponseLanguageInstruction(locale)), `${name} did not select ${locale}`);
+                // 翻译 prompt 使用独立的语言强制指令（不能沿用“保留日文原文”的解析指令）
+                if (name === 'translate') {
+                  const expectedTarget = locale === 'ko' ? '자연스러운 한국어'
+                    : locale === 'en' ? 'natural English'
+                    : locale === 'zh-TW' ? '繁體中文'
+                    : '简体中文';
+                  assert.ok(payload.messages[0].content.includes(expectedTarget), `${name} did not select ${locale}`);
+                  assert.match(payload.messages[0].content, /NEVER return the Japanese source text/);
+                } else {
+                  assert.ok(payload.messages[0].content.includes(getResponseLanguageInstruction(locale)), `${name} did not select ${locale}`);
+                }
               }
               if (name === 'translate') {
                 assert.equal(payload.messages[1].content, bodies.translate.text, 'Keep original Japanese paragraphs');
