@@ -64,6 +64,16 @@ export default function SettingsModal({
   const [customModelName, setCustomModelName] = useState(customTextModel);
   const [customExtra, setCustomExtra] = useState(customTextExtraBody);
   const [status, setStatus] = useState('');
+  const [appVersion, setAppVersion] = useState<string | null>(null);
+
+  // Tauri 环境下显示应用版本号，便于确认当前运行的是哪个 portable 构建
+  useEffect(() => {
+    if (!isModalOpen) return;
+    import('@tauri-apps/api/app')
+      .then((mod) => mod.getVersion())
+      .then(setAppVersion)
+      .catch(() => setAppVersion(null));
+  }, [isModalOpen]);
   const [customExtraError, setCustomExtraError] = useState('');
 
   useEffect(() => {
@@ -332,6 +342,7 @@ export default function SettingsModal({
 
         <p className="mb-0 mt-4 text-xs leading-5" style={{ color: 'var(--ink-3)' }}>
           {t("密钥保存在此浏览器中，随请求发送用于调用模型。留空则使用默认配置。")}
+          {appVersion && <span>　（当前版本 v{appVersion}）</span>}
         </p>
       </div>
     </div>

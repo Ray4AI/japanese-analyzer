@@ -20,6 +20,7 @@ import {
   loadAISettingsFromStorage,
   normalizeAIModel,
   normalizeAIProvider,
+  parseAnalyzeResponseContent,
   parseWordDetailResponseContent,
   readOpenAIContentStream,
   type StorageLike
@@ -498,6 +499,16 @@ const customOverridePayload = withProviderControls(
   { structuredOutput: 'analysisTokens', customExtraBody: '{"response_format":{"type":"json_object"}}' }
 );
 assert.deepStrictEqual(customOverridePayload.response_format, { type: 'json_object' });
+
+// 宽容提取：思维链标签 / 说明文字包裹 / 无换行围栏，都不能导致最终解析失败
+const cleanTokens = JSON.stringify({ tokens: [{ word: '僕', pos: '名詞', furigana: 'ぼく' }] });
+assert.strictEqual(parseAnalyzeResponseContent(`<think>先想想怎么切分</think>\n${cleanTokens}`).length, 1);
+assert.strictEqual(parseAnalyzeResponseContent(`<think>只到这里没有闭合\n${cleanTokens}`).length, 1);
+assert.strictEqual(parseAnalyzeResponseContent(`解析结果如下：\n${cleanTokens}\n以上。`).length, 1);
+assert.strictEqual(parseAnalyzeResponseContent('```json' + cleanTokens + '```').length, 1);
+assert.strictEqual(parseAnalyzeResponseContent(cleanTokens).length, 1);
+assert.throws(() => parseAnalyzeResponseContent('完全没有 JSON 的回复'));
+assert.throws(() => parseAnalyzeResponseContent('{"foo":1}'), /tokens/);
 
 function streamData(payload: unknown): string {
   return `data: ${JSON.stringify(payload)}\n\n`;

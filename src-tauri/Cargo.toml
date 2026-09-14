@@ -1,6 +1,6 @@
 [package]
 name = "japanese-analyzer"
-version = "0.3.1"
+version = "0.3.2"
 description = "日本語文章解析 - Tauri Windows 封装"
 edition = "2021"
 
@@ -8,7 +8,7 @@ edition = "2021"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["devtools"] }
 tauri-plugin-http = "2"
 base64 = "0.22"
 serde = { version = "1", features = ["derive"] }

@@ -408,13 +408,45 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
 
-function extractJsonText(content: string): string {
-  const jsonMatch = content.match(/```(?:json)?\n([\s\S]*?)\n```/);
-  if (jsonMatch && jsonMatch[1]) {
-    return jsonMatch[1].trim();
-  }
+/**
+ * 依次生成 JSON 提取候选（优先级从高到低）。
+ * 模型可能把思维链标签（<think>…</think>）、说明文字、代码围栏混进 content，
+ * 单一策略容易误伤，因此生成多个候选交给调用方依次尝试。
+ */
+function extractJsonCandidates(content: string): string[] {
+  const list: string[] = [];
+  const push = (value: string | undefined | null) => {
+    if (value && value.trim()) list.push(value.trim());
+  };
 
-  return content.trim();
+  // 只剥离“已闭合”的思维链块；未闭合的交由 braceSlice 等后续候选兜底
+  const stripped = content.replace(/<think>[\s\S]*?<\/think>/gi, '');
+
+  const fence = (source: string) => source.match(/```(?:json)?\n([\s\S]*?)\n```/)?.[1];
+  const looseFence = (source: string) => {
+    const match = source.match(/```(?:json)?\s*([\s\S]*?)```/)?.[1];
+    return match && match.trim().startsWith('{') ? match : undefined;
+  };
+  const braceSlice = (source: string) => {
+    const trimmed = source.trim();
+    if (trimmed.startsWith('{') && trimmed.endsWith('}')) return trimmed;
+    const objectStart = trimmed.indexOf('{');
+    const objectEnd = trimmed.lastIndexOf('}');
+    return objectStart !== -1 && objectEnd > objectStart ? trimmed.slice(objectStart, objectEnd + 1) : undefined;
+  };
+
+  for (const source of [stripped, content]) {
+    push(fence(source));
+    push(looseFence(source));
+  }
+  push(stripped);
+  push(braceSlice(stripped));
+  push(braceSlice(content));
+  return list;
+}
+
+function extractJsonText(content: string): string {
+  return extractJsonCandidates(content)[0] ?? content.trim();
 }
 
 function normalizeTokenDataArray(parsed: unknown): TokenData[] {
@@ -446,7 +478,17 @@ function normalizeTokenDataArray(parsed: unknown): TokenData[] {
 }
 
 export function parseAnalyzeResponseContent(content: string): TokenData[] {
-  return normalizeTokenDataArray(JSON.parse(extractJsonText(content)));
+  // 依次尝试各提取候选：思维链标签、说明文字包裹等脏输出不会一票否决，
+  // 只有所有候选都失败才报错。
+  let lastError: unknown = new Error('解析结果为空');
+  for (const candidate of extractJsonCandidates(content)) {
+    try {
+      return normalizeTokenDataArray(JSON.parse(candidate));
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError;
 }
 
 export async function summarizeDeepSeekReasoningProgress(
@@ -892,7 +934,14 @@ export async function readOpenAIContentStream(
     if (options.validateFinalContent) {
       try {
         options.validateFinalContent(rawContent);
-      } catch {
+      } catch (validationError) {
+        // 诊断日志：输出原始内容首尾，便于定位是思维链标签、说明文字还是截断导致
+        console.warn(
+          `[解析诊断] 最终内容未通过校验（长度 ${rawContent.length}），校验错误:`,
+          validationError instanceof Error ? validationError.message : validationError,
+          '\n头部:', JSON.stringify(rawContent.slice(0, 150)),
+          '\n尾部:', JSON.stringify(rawContent.slice(-250)),
+        );
         return fail(new InvalidResponseError(
           options.invalidContentMessage || `${completionLabel}没有完整生成，请重新生成。`
         ));
